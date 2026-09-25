@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-Hant-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="theme-color" content="#f4f1e8" id="theme-color">
+  <meta name="description" content="一支手機、所有人都能參與。支援身份分配、語音主持、夜間結算、死亡技能與屠邊勝負的狼人殺自動法官。">
+  <meta name="color-scheme" content="light dark">
+  <title>狼人殺自動法官</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='18' fill='%23182725'/%3E%3Cpath d='M45 44A22 22 0 0 1 25 10 23 23 0 1 0 54 39a22 22 0 0 1-9 5' fill='%23d6b477'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="./style.css?v=1.0.0">
+  <script src="./script.js?v=1.0.0" defer></script>
+</head>
+<body data-theme="day">
+  <div class="ambient" aria-hidden="true"></div>
+  <div class="app-shell">
+    <header class="topbar" id="topbar">
+      <div class="brand" aria-label="狼人殺自動法官">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>狼人殺法官<small>AUTO JUDGE</small></span>
+      </div>
+      <div class="toolbar" id="toolbar"></div>
+    </header>
+    <div id="persistent-notice" class="persistent-notice" role="status" hidden></div>
+    <main id="app" tabindex="-1">
+      <section class="panel center">
+        <div class="moon-art" aria-hidden="true"><span class="moon"></span></div>
+        <h1>狼人殺自動法官</h1>
+        <p>正在準備遊戲畫面…</p>
+        <p class="muted">若畫面一直停在這裡，請確認三個檔案放在同一個資料夾，並使用 GitHub Pages 網址開啟。</p>
+      </section>
+    </main>
+    <footer class="app-footer" id="app-footer">
+      <span>一支手機，一起入夜。</span>
+      <span>V1.0.0</span>
+    </footer>
+  </div>
+  <dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+  <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  <noscript><div class="noscript">請啟用瀏覽器的 JavaScript，才能使用自動法官。</div></noscript>
+</body>
+</html>
