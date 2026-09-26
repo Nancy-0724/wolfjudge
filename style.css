@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.1.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.2.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -351,3 +351,22 @@ body.slot-overdue .timer-number { color: var(--danger); }
 @media (max-width: 480px) { .identity-list { grid-template-columns: 1fr; } }
 @media (prefers-reduced-motion: reduce) { body.slot-overdue::after { animation: none !important; opacity: .65; } }
 @media print { .overtime-warning, body.slot-overdue::after { display: none; } }
+
+/* V1.2：八種角色；白天號碼無身份標示。 */
+.summary-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+.summary-item { min-width: 0; }
+.role-icon[data-role-icon="guard"] { color: #526b92; }
+.role-icon[data-role-icon="knight"] { color: #906b3c; }
+.role-icon[data-role-icon="wolfking"] { color: #9a5548; }
+body[data-theme="night"] .role-icon[data-role-icon="guard"] { color: #b3c8ef; }
+body[data-theme="night"] .role-icon[data-role-icon="knight"] { color: #e4c58c; }
+body[data-theme="night"] .role-icon[data-role-icon="wolfking"] { color: #eeb0a1; }
+.discussion-grid .player-button:not(:disabled):hover { border-color: var(--gold); }
+.discussion-grid .player-button:not(:disabled):active { background: var(--gold-soft); }
+@media (max-width: 380px) {
+  .role-info { min-width: 0; }
+  .role-row { gap: 8px; }
+  .role-controls { gap: 6px; }
+  .role-seal { width: 40px; height: 44px; }
+  .role-info strong { font-size: 14px; }
+}
