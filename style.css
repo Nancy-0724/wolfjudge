@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.5.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.6.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -653,3 +653,10 @@ body[data-theme="night"] .camp-group .summary-item.is-excluded .summary-icon { c
   .camp-total { font-size: 25px; padding: 3px 9px; }
   .identity-camp-banner strong { font-size: 27px; }
 }
+
+/* V1.6：狼美人狼面／愛心圖示僅用於配置、私人身份、指定夜間與終局。 */
+.role-icon[data-role-icon="wolfbeauty"] { color: #a44d64; }
+body[data-theme="night"] .role-icon[data-role-icon="wolfbeauty"] { color: #efb0c1; }
+/* 沿用 camp-group / private-role-panel 的陣營配色；公開號碼不標陣營。 */
+.camp-group .role-icon[data-role-icon="wolfbeauty"],
+.private-role-panel .role-icon[data-role-icon="wolfbeauty"] { color: var(--camp-color); }
