@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.4.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.5.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -512,3 +512,144 @@ body[data-mode="play"].slot-overdue .timer-fill { background: var(--danger); }
   .potion-action { min-height: 77px; padding-top: 8px; padding-bottom: 8px; }
 }
 @media (prefers-reduced-motion: reduce) { body[data-mode="play"].slot-overdue::after { animation: none !important; } }
+
+/* V1.5：陣營與配置狀態。不把 camp-* 套到共用號碼或整頁背景，避免身份外洩。 */
+.camp-wolf {
+  --camp-color: #9b3935;
+  --camp-border: #c57a72;
+  --camp-bg: #f9e5df;
+  --camp-on: #fff9f6;
+}
+.camp-good {
+  --camp-color: #236650;
+  --camp-border: #73a58c;
+  --camp-bg: #e2f1e7;
+  --camp-on: #f5fff9;
+}
+body[data-theme="night"] .camp-wolf {
+  --camp-color: #f1b0a5;
+  --camp-border: #af7067;
+  --camp-bg: #3c2728;
+  --camp-on: #321b1b;
+}
+body[data-theme="night"] .camp-good {
+  --camp-color: #afe0c7;
+  --camp-border: #679884;
+  --camp-bg: #1b3831;
+  --camp-on: #132e25;
+}
+.camp-summary, .camp-config { display: grid; gap: 27px; margin: 24px 0; }
+.camp-group { min-width: 0; }
+.camp-group-header {
+  display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  border-left: 5px solid var(--camp-color); padding: 1px 0 1px 13px; margin-bottom: 13px;
+}
+.camp-group-header h2 { color: var(--camp-color); font-size: 22px; line-height: 1.3; margin: 0; letter-spacing: .015em; }
+.camp-group-header p { margin: 5px 0 0; font-size: 15px; color: var(--muted); line-height: 1.35; }
+.camp-total {
+  display: inline-flex; gap: 5px; align-items: baseline; flex-shrink: 0;
+  font-size: 27px; font-weight: 750; font-variant-numeric: tabular-nums;
+  color: var(--camp-color); background: var(--camp-bg); border: 1px solid var(--camp-border);
+  border-radius: 12px; padding: 3px 12px; line-height: 1.5;
+}
+.camp-total > span { font-size: 15px; font-weight: 600; }
+.camp-group .summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); margin: 0; gap: 10px; }
+.camp-group .summary-item {
+  display: flex; flex-direction: column; justify-content: center; align-items: center;
+  min-width: 0; min-height: 145px; padding: 10px 5px 11px;
+  border: 2px solid var(--camp-border); border-radius: 14px; background: var(--camp-bg);
+}
+.camp-group .summary-item h3 { font-size: 16px; font-weight: 700; margin: 4px 0 6px; line-height: 1.35; color: var(--camp-color); }
+.camp-group .summary-item .summary-icon { color: var(--camp-color); width: 35px; height: 35px; margin: 9px auto 0; }
+.camp-group .summary-item .role-presence {
+  display: inline-block; background: var(--camp-color); color: var(--camp-on);
+  font-size: 12px; font-weight: 650; line-height: 1.5; border-radius: 7px; padding: 2px 7px;
+}
+.camp-group .summary-count { display: flex; align-items: baseline; justify-content: center; gap: 5px; color: var(--camp-color); }
+.camp-group .summary-count strong { display: inline; margin: 0; font-family: var(--font); font-size: 27px; font-weight: 750; line-height: 1.1; }
+.camp-group .summary-count > span { font-size: 14px; color: inherit; }
+/* 未加入的角色保留在原位，灰底＋虛線＋文字，不以透明度犧牲可讀性。 */
+.camp-group .summary-item.is-excluded {
+  border: 2px dashed #c4c7c0; background: #eeefeb;
+}
+.camp-group .summary-item.is-excluded .role-presence { background: #e0e3dc; color: #5b655d; }
+.camp-group .summary-item.is-excluded h3,
+.camp-group .summary-item.is-excluded .summary-count,
+.camp-group .summary-item.is-excluded .summary-icon { color: #6b756d; }
+body[data-theme="night"] .camp-group .summary-item.is-excluded { background: #242f2c; border-color: #55625c; }
+body[data-theme="night"] .camp-group .summary-item.is-excluded .role-presence { background: #35423c; color: #c5cec7; }
+body[data-theme="night"] .camp-group .summary-item.is-excluded h3,
+body[data-theme="night"] .camp-group .summary-item.is-excluded .summary-count,
+body[data-theme="night"] .camp-group .summary-item.is-excluded .summary-icon { color: #b9c6bc; }
+/* 編輯配置也依陣營分區；未加入列仍可切換，不把整列設為 disabled。 */
+.camp-role-rows { display: grid; gap: 10px; }
+.role-config-group .role-row {
+  border: 1px solid var(--camp-border); border-left-width: 4px; background: var(--camp-bg);
+  border-radius: 14px; padding: 12px; gap: 12px;
+}
+.role-config-group .role-row .role-info { min-width: 0; }
+.role-name-line { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
+.role-config-group .role-info strong { color: var(--camp-color); font-size: 17px; line-height: 1.3; }
+.role-config-group .role-info small { display: block; margin-top: 5px; font-size: 13px; line-height: 1.5; color: #53635a; }
+.row-presence { font-size: 12px; font-weight: 600; color: var(--camp-color); white-space: nowrap; }
+.role-config-group .role-row .role-seal { background: transparent; border: 0; width: 38px; height: 44px; }
+.role-config-group .role-seal .role-icon { color: var(--camp-color); width: 35px; height: 35px; }
+.role-config-group .toggle[aria-checked="true"] { background: var(--camp-color); }
+.role-config-group .role-controls { gap: 8px; }
+.role-config-group .role-controls button { min-width: 36px; height: 42px; background: var(--surface); }
+.role-config-group .role-row.is-excluded { background: #eeefeb; border: 1px dashed #bfc8c0; border-left-width: 4px; }
+.role-config-group .role-row.is-excluded .role-info strong,
+.role-config-group .role-row.is-excluded .row-presence,
+.role-config-group .role-row.is-excluded .role-seal .role-icon { color: #69756c; }
+/* 私人身份卡：明確「你是好人／你是壞人」；原本顯示與確認步驟不變。 */
+.private-role-panel .identity-card {
+  background: var(--camp-bg); border: 2px solid var(--camp-border); border-top: 0;
+  border-radius: 21px; max-width: 390px; min-height: 0; padding: 0 22px 23px; overflow: hidden;
+}
+.private-role-panel .identity-card::before, .private-role-panel .identity-card::after { display: none; }
+.identity-camp-banner {
+  width: calc(100% + 44px); margin: 0 -22px 23px; padding: 14px 12px 13px;
+  color: var(--camp-on); background: var(--camp-color); display: flex; flex-direction: column; align-items: center;
+}
+.identity-camp-banner strong { display: block; font-size: 29px; font-weight: 800; letter-spacing: .08em; line-height: 1.35; }
+.identity-camp-banner > span { font-size: 17px; margin-top: 3px; font-weight: 650; }
+.private-role-panel .identity-card .identity-icon { width: 86px; height: 86px; color: var(--camp-color); margin-bottom: 13px; }
+.private-role-panel .identity-card h1 { color: var(--camp-color); font-size: clamp(32px, 8.5vw, 43px); margin-bottom: 10px; }
+.identity-category { color: var(--camp-color); border: 1px solid var(--camp-border); border-radius: 99px; padding: 2px 12px; font-size: 16px; }
+.private-role-panel .identity-card .identity-goal { margin-top: 16px; font-size: 17px; color: var(--ink); line-height: 1.65; }
+.private-role-panel .identity-card .teammates { border-color: var(--camp-border); margin-top: 16px; padding-top: 14px; font-size: 16px; color: var(--ink); }
+.private-role-panel .identity-card .teammates strong { display: inline-block; margin-top: 6px; font-size: 18px; }
+.private-role-panel .identity-description { font-size: 17px; text-align: left; color: var(--ink); line-height: 1.75; margin-bottom: 0; }
+/* 閉眼指令後的固定三秒緩衝；不播倒數、不加聲光音效、不顯示任何目標。 */
+.night-buffer { width: min(180px, 100%); margin-top: 19px; color: var(--muted); }
+.night-buffer > p { font-size: 18px; margin: 0; }
+.buffer-count { display: flex; justify-content: center; align-items: baseline; gap: 8px; margin: 2px 0 13px; }
+.buffer-count > span:first-child { font-size: 46px; font-weight: 650; color: var(--ink); line-height: 1.4; font-variant-numeric: tabular-nums; }
+.buffer-count > span:last-child { font-size: 17px; }
+.buffer-track { height: 3px; background: var(--line); border-radius: 6px; overflow: hidden; }
+#buffer-fill { width: 100%; height: 100%; background: var(--gold); transform-origin: left center; }
+@media (max-width: 420px) {
+  .camp-group-header { padding-left: 10px; }
+  .camp-group-header h2 { font-size: 20px; }
+  .camp-group-header p { font-size: 14px; }
+  .camp-group .summary-grid { gap: 8px; }
+  .camp-group .summary-item { min-height: 136px; padding-left: 3px; padding-right: 3px; }
+  .camp-group .summary-item h3 { font-size: 15px; }
+  .camp-group .summary-item .role-presence { font-size: 12px; padding: 2px 4px; }
+  .role-config-group .role-row { gap: 9px; padding: 10px 8px; }
+  .role-config-group .role-row .role-seal { width: 32px; }
+  .role-config-group .role-seal .role-icon { width: 31px; height: 31px; }
+  .role-config-group .role-info strong { font-size: 16px; }
+  .role-config-group .role-controls { gap: 6px; }
+  .role-config-group .role-controls button { min-width: 31px; }
+  .role-config-group .role-count { min-width: 16px; }
+  .role-name-line { gap: 3px 6px; }
+}
+@media (max-width: 350px) {
+  .camp-group .summary-grid { gap: 6px; }
+  .camp-group .summary-item { border-radius: 11px; }
+  .camp-group .summary-item h3 { font-size: 14px; }
+  .role-config-group .role-row .role-seal { display: none; }
+  .camp-total { font-size: 25px; padding: 3px 9px; }
+  .identity-camp-banner strong { font-size: 27px; }
+}

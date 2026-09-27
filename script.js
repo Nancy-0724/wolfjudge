@@ -1,5 +1,5 @@
 /*
- * 狼人殺自動法官 V1.4.0
+ * 狼人殺自動法官 V1.5.0
  * 無外部函式庫、後端或網路請求；使用 GitHub Pages 即可。
  *
  * 區段：①角色與純規則 ②狀態轉換 ③儲存/語音/計時 ④畫面 ⑤事件。
@@ -14,7 +14,9 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.4.0';
+  const VERSION = '1.5.0';
+  // 只在夜間角色閉眼指令完成後緩衝；不延遲睜眼後的操作。
+  const NIGHT_BUFFER_MS = 3000;
   const SCHEMA = 4;
   const RULESET = 'v1.3-five-min-evil-once-poison-first-day-retaliation';
   const MIN_PLAYERS = 5;
@@ -141,6 +143,17 @@
     return NIGHT_STEPS.filter(step => step.role === 'wolf'
       ? ROLE_ORDER.some(role => ROLES[role].camp === 'wolf' && game.config.roles[role] > 0)
       : (game.config.roles[step.role] || 0) > 0);
+  }
+  function nightBufferKey(game) {
+    return `buffer:${game.round}:${game.phase}`;
+  }
+  function isNightClosing(game) {
+    return !!game && game.status === 'playing' && NIGHT_STEPS.some(step => step.sleep === game.phase);
+  }
+  function isNightBuffer(game, candidate) {
+    return isNightClosing(game) && candidate?.kind === 'buffer' && candidate.key === nightBufferKey(game) &&
+      candidate.total === NIGHT_BUFFER_MS && Number.isFinite(candidate.remaining) &&
+      candidate.remaining >= 0 && candidate.remaining <= NIGHT_BUFFER_MS;
   }
   function maySkipSeer(game) {
     // 根據開局配置固定顯示；不能隨惡靈死亡或反傷已使用而改變，避免洩漏狀態。
@@ -938,7 +951,7 @@
       roleActor, currentDeath, isNight, isSlotPhase, configuredNightSteps, endIfWinner,
       availableDayAction, markDeath, makeResolution, advanceResolution, startNight, ROLE_ORDER, SCHEMA, RULESET,
       MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, maySkipSeer, nightOpenText,
-      interfaceTransition, compactState, pageKey, defaultUI };
+      interfaceTransition, compactState, pageKey, defaultUI, NIGHT_BUFFER_MS, nightBufferKey, isNightClosing, isNightBuffer };
   }
   if (typeof document === 'undefined') return;
 
@@ -1024,8 +1037,33 @@
   }
   function totalConfigured() { return Object.values(draft.roles).reduce((sum, value) => sum + value, 0); }
   function stepTrack(n) { return `<div class="step-track" aria-label="設定步驟 ${n} / 3">${[1, 2, 3].map(i => `<span class="${i <= n ? 'active' : ''}"></span>`).join('')}</div>`; }
+  // 陣營樣式只用於公開配置與私人身份卡，絕不套用到白天號碼／通用技能介面。
+  const CAMP_PRESENTATION = Object.freeze({
+    wolf: { name: '狼人陣營', side: '壞人方', headline: '你是壞人',
+      goal: '目標：讓村民全滅，或神職全滅。' },
+    good: { name: '好人陣營', side: '好人方', headline: '你是好人',
+      goal: '目標：淘汰所有狼人陣營玩家。' }
+  });
+  function campHeader(config, camp) {
+    const info = CAMP_PRESENTATION[camp];
+    const roles = ROLE_ORDER.filter(role => ROLES[role].camp === camp);
+    const total = roles.reduce((sum, role) => sum + config.roles[role], 0);
+    const villagers = config.roles.villager;
+    const detail = camp === 'wolf' ? '壞人方' : `村民 ${villagers} 人 · 神職 ${total - villagers} 人`;
+    return `<header class="camp-group-header"><div><h2>${info.name}</h2><p>${detail}</p></div><span class="camp-total">${total}<span>人</span></span></header>`;
+  }
   function roleSummary(config) {
-    return `<div class="summary-grid">${ROLE_ORDER.map(r => `<div class="summary-item">${roleIcon(r, 'summary-icon')}<strong>${config.roles[r]}</strong><span>${ROLES[r].name}</span></div>`).join('')}</div>`;
+    return `<div class="camp-summary">${['wolf', 'good'].map(camp => {
+      const cards = ROLE_ORDER.filter(role => ROLES[role].camp === camp).map(role => {
+        const count = config.roles[role];
+        const included = count > 0;
+        return `<div class="summary-item ${included ? 'is-included' : 'is-excluded'}" data-summary-role="${role}" aria-label="${ROLES[role].name}，${count} 人，${included ? '本局加入' : '未加入'}">
+          <span class="role-presence">${included ? '✓ 本局加入' : '未加入'}</span>
+          ${roleIcon(role, 'summary-icon')}<h3>${ROLES[role].name}</h3><div class="summary-count"><strong>${count}</strong><span>人</span></div>
+        </div>`;
+      }).join('');
+      return `<section class="camp-group camp-${camp}" aria-label="${CAMP_PRESENTATION[camp].name}">${campHeader(config, camp)}<div class="summary-grid">${cards}</div></section>`;
+    }).join('')}</div>`;
   }
   function rulesHTML() {
     return `<details class="rules-details"><summary>查看本版家規與使用提醒</summary><div class="rules-content">
@@ -1045,7 +1083,7 @@
       <p><strong>操作時間：</strong>完成可立即結束；逾時只低頻閃紅催促，仍能選擇、返回與確認。已配置但已死亡的夜間角色保留等待時段，時間差仍可能成為推理線索。</p>
       <p><strong>資訊保護：</strong>私密身份、夜間目標與查驗結果不朗讀。切換 App 或暫停會遮蔽。沒有操作碼，網站不能驗證拿手機的人，禁止試點他人號碼；所有玩家仍須遵守閉眼規則。</p>
       <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版沿用 V1.3 的規則與存檔。V1.2 及更早的舊局不相容。</p>
-      <p><strong>V1.4 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。每段睜眼／閉眼主持詞播完立即銜接；文字模式需由玩家讀出提示後按「繼續」。開局查看身份仍須本人逐一確認。</p>
+      <p><strong>V1.5 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
     </div></details>`;
   }
 
@@ -1100,9 +1138,10 @@
     renderFooter();
   }
   function cleanSavedClock(input) {
-    if (!input || !['auto', 'slot'].includes(input.kind) || typeof input.key !== 'string' ||
+    if (!input || !['auto', 'slot', 'buffer'].includes(input.kind) || typeof input.key !== 'string' ||
       !Number.isFinite(input.remaining) || !Number.isFinite(input.total)) return null;
     if (input.total <= 0 || input.total > 120000 || input.remaining < 0 || input.remaining > 120000) return null;
+    if (input.kind === 'buffer' && (input.total !== NIGHT_BUFFER_MS || input.remaining > NIGHT_BUFFER_MS)) return null;
     return { kind: input.kind, key: input.key, total: input.total, remaining: Math.min(input.total, input.remaining) };
   }
 
@@ -1257,7 +1296,7 @@
     const kind = clock.kind;
     stopClock();
     clock.remaining = 0;
-    if (kind === 'auto') { clock = null; autoKey = null; dispatch({ type: 'AUTO' }); }
+    if (kind === 'auto' || kind === 'buffer') { clock = null; autoKey = null; dispatch({ type: 'AUTO' }); }
     else if (game.night.completed[game.night.activeRole]) {
       // 僅供已死亡行動者的等待時段；存活角色在完成時已直接進入閉眼頁。
       clock = null; dispatch({ type: 'FINISH_SLOT' });
@@ -1277,27 +1316,44 @@
     if (!snap) return;
     const text = document.getElementById('timer-number');
     const fill = document.getElementById('timer-fill');
-    const auto = document.getElementById('auto-countdown');
+    const bufferNumber = document.getElementById('buffer-number');
+    const bufferFill = document.getElementById('buffer-fill');
     if (text) text.textContent = overdue ? '已逾時' : `${Math.ceil(remaining / 1000)} 秒`;
     if (fill) fill.style.transform = `scaleX(${Math.min(1, Math.max(0, remaining / snap.total))})`;
-    if (auto && clockEnd !== null) auto.textContent = `即將進入下一階段 · ${Math.ceil(remaining / 1000)} 秒`;
+    if (bufferNumber && isNightBuffer(game, snap)) bufferNumber.textContent = String(Math.ceil(remaining / 1000));
+    if (bufferFill && isNightBuffer(game, snap)) bufferFill.style.transform = `scaleX(${Math.max(0, remaining / snap.total)})`;
   }
 
+  function beginNightBuffer() {
+    if (!game || !active || paused || foreignUpdate || !isNightClosing(game)) return;
+    if (isNightBuffer(game, clock)) return; // 防重複點擊，不延長／重開同一段計時。
+    setClock('buffer', nightBufferKey(game), NIGHT_BUFFER_MS);
+    autoKey = `auto:${game.round}:${game.phase}`;
+    render();
+    runClock();
+    saveGame();
+  }
+  function continueTextCue() {
+    if (!game || !active || paused || foreignUpdate || settings.audio || !AUTO_PHASES.has(game.phase)) return;
+    if (isNightClosing(game)) beginNightBuffer();
+    else dispatch({ type: 'AUTO' });
+  }
   function ensureFlow() {
     if (!game || !active || paused || foreignUpdate) return;
     if (AUTO_PHASES.has(game.phase)) {
       const key = `auto:${game.round}:${game.phase}`;
       if (autoKey === key) return;
       autoKey = key;
+      // 已播完閉眼的緩衝可暫停／還原：續跑剩餘時間，不重播也不重置三秒。
+      if (isNightBuffer(game, clock)) { runClock(); return; }
       stopClock(); clock = null;
       const token = ++flowToken;
       const current = () => token === flowToken && active && !paused && !foreignUpdate;
-      // 結算沒有主持詞，立即銜接。不得在此之前略過角色的私密操作。
       if (game.phase === 'NIGHT_RESOLVE') {
         Promise.resolve().then(() => { if (current()) dispatch({ type: 'AUTO' }); });
         return;
       }
-      // 無語音時保留一個明確的前進鍵，避免閉眼提示閃過就露出操作頁。
+      // 文字模式由現場讀完提示，再按一次繼續／已閉眼；不跳過閉眼緩衝。
       if (!settings.audio) return;
       voice.speak(publicPrompt(game)).then(result => {
         if (!current()) return;
@@ -1305,8 +1361,8 @@
           if (result.reason !== 'cancelled') { notifyVoiceFailure(); pauseGame('audio'); }
           return;
         }
-        // onend 後直接開放操作或播放下一句，沒有額外 3 秒等待。
-        dispatch({ type: 'AUTO' });
+        if (isNightClosing(game)) beginNightBuffer();
+        else dispatch({ type: 'AUTO' }); // 睜眼：onend 後立即開放，不另加三秒。
       });
     } else if (isSlotPhase(game)) {
       autoKey = null;
@@ -1429,7 +1485,7 @@
     const stored = savedEnvelope?.game;
     const resume = stored ? `<div class="resume-card"><div class="resume-text"><strong>${stored.status === 'finished' ? '上一局已結束' : '有一局尚未結束'}</strong><p>${stored.round ? `第 ${stored.round} 回合` : '身份分配階段'} · ${stored.config.playerCount} 人</p></div></div>` : '';
     return `<div class="page"><section class="panel home-panel">
-      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.4</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
+      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.5</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
       <p class="home-copy">九種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
       ${resume}<div class="actions">${stored ? btn(stored.status === 'finished' ? '查看上一局結果' : '繼續上次遊戲', 'LOAD_GAME') : ''}${btn(`開始新遊戲 ${icons.arrow}`, 'NEW_GAME', stored ? 'secondary' : 'primary')}</div>
       <div class="home-features"><div class="feature"><strong>一機輪流</strong>不用實體身份牌</div><div class="feature"><strong>語音帶局</strong>夜間流程自動推進</div><div class="feature"><strong>自動結算</strong>記錄死亡與勝負</div></div>
@@ -1448,21 +1504,26 @@
   }
   function renderSetupRoles() {
     const errors = configErrors(draft);
-    const rows = ROLE_ORDER.map(role => {
-      const r = ROLES[role];
-      const controls = r.max === 1
-        ? `<button type="button" class="toggle" role="switch" aria-label="加入${r.name}" aria-checked="${draft.roles[role] === 1}" data-action="TOGGLE_ROLE" data-role="${role}"></button>`
-        : `<div class="role-controls"><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="-1" aria-label="減少${r.name}" ${draft.roles[role] <= (role === 'wolf' ? 0 : 1) ? 'disabled' : ''}>−</button><span class="role-count">${draft.roles[role]}</span><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="1" aria-label="增加${r.name}" ${draft.roles[role] >= draft.playerCount ? 'disabled' : ''}>＋</button></div>`;
-      return `<div class="role-row"><span class="role-seal" aria-hidden="true">${roleIcon(role)}</span><div class="role-info"><strong>${r.name}</strong><small>${r.summary}</small></div>${controls}</div>`;
+    const groups = ['wolf', 'good'].map(camp => {
+      const rows = ROLE_ORDER.filter(role => ROLES[role].camp === camp).map(role => {
+        const r = ROLES[role];
+        const included = draft.roles[role] > 0;
+        const controls = r.max === 1
+          ? `<button type="button" class="toggle" role="switch" aria-label="加入${r.name}" aria-checked="${draft.roles[role] === 1}" data-action="TOGGLE_ROLE" data-role="${role}"></button>`
+          : `<div class="role-controls"><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="-1" aria-label="減少${r.name}" ${draft.roles[role] <= (role === 'wolf' ? 0 : 1) ? 'disabled' : ''}>−</button><span class="role-count">${draft.roles[role]}</span><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="1" aria-label="增加${r.name}" ${draft.roles[role] >= draft.playerCount ? 'disabled' : ''}>＋</button></div>`;
+        return `<div class="role-row ${included ? 'is-included' : 'is-excluded'}" data-config-role="${role}"><span class="role-seal" aria-hidden="true">${roleIcon(role)}</span><div class="role-info"><div class="role-name-line"><strong>${r.name}</strong><span class="row-presence">${included ? '已加入' : '未加入'}</span></div><small>${r.summary}</small></div>${controls}</div>`;
+      }).join('');
+      return `<section class="camp-group role-config-group camp-${camp}" aria-label="${CAMP_PRESENTATION[camp].name}">${campHeader(draft, camp)}<div class="camp-role-rows">${rows}</div></section>`;
     }).join('');
     return panel(`${stepTrack(2)}${heading('分配角色數量', '先設定牌組；下一步才會隨機發給玩家。', '02 / 角色配置')}
-      <div>${rows}</div><div class="config-count"><span>已配置角色</span><strong>${totalConfigured()} / ${draft.playerCount}</strong></div>
+      <div class="camp-config">${groups}</div><div class="config-count"><span>已配置角色</span><strong>${totalConfigured()} / ${draft.playerCount}</strong></div>
       ${errors.length ? note(errors.map(esc).join('<br>'), 'warning') : note('配置完成。特殊角色各 0 或 1 名；普通狼人可為 0，只要狼人陣營合計至少一名即可。')}
       ${draft.playerCount === 5 ? note('五人仍採屠邊，第一夜起正常行動；本配置未經勝率平衡驗證，反傷可能讓遊戲快速結束。') : ''}
       ${draft.roles.evilknight ? evilRulesNote() : ''}
       <div class="center"><button type="button" class="text-button" data-action="RECOMMEND_ROLES">依人數重新配置</button></div>
       <div class="actions two">${btn('上一步', 'SETUP_COUNT', 'secondary')}${btn('確認設定', 'SETUP_CONFIRM', 'primary', errors.length ? 'disabled' : '')}</div>`);
   }
+
   function renderSetupConfirm() {
     return `<div class="page"><section class="panel">${stepTrack(3)}${heading(`${draft.playerCount} 人局，準備入夜`, '請確認角色與主持設定，再開始秘密發牌。', '03 / 確認設定')}
       ${roleSummary(draft)}${note('<strong>本版固定家規</strong><br>屠邊勝負 · 女巫不可自救 · 同守同救死亡<br>獵人保有合法反擊 · 狼王自爆可帶人<br>解藥用完不看刀 · 決鬥、自爆者無遺言')}
@@ -1608,8 +1669,13 @@
     if (closing) title = `${closing.label}請閉眼`;
     if (game.phase === 'NIGHT_RESOLVE') title = '請保持閉眼';
     if (game.phase === 'DAWN') { title = '天亮請睜眼'; kind = 'sun'; }
-    const controls = !settings.audio && game.phase !== 'NIGHT_RESOLVE' ? btn('繼續', 'AUTO') : '';
-    return playPage(`<div class="play-phase-label">第 ${game.round} ${kind === 'sun' ? '天' : '夜'}</div>${symbol(kind)}<h1 class="cue-title">${title}</h1>${!settings.audio && game.phase !== 'NIGHT_RESOLVE' ? '<p class="cue-hint">讀出提示後繼續</p>' : ''}`, controls, 'center cue-panel');
+    const buffering = isNightBuffer(game, clock);
+    const snap = buffering ? clockSnapshot() : null;
+    const seconds = snap ? Math.ceil(snap.remaining / 1000) : NIGHT_BUFFER_MS / 1000;
+    const buffer = buffering ? `<div class="night-buffer"><p>交接緩衝</p><div class="buffer-count"><span id="buffer-number">${seconds}</span><span>秒</span></div><div class="buffer-track" aria-hidden="true"><div id="buffer-fill"></div></div></div>` : '';
+    const manual = !settings.audio && game.phase !== 'NIGHT_RESOLVE' && !buffering;
+    const controls = manual ? btn(closing ? '已閉眼' : '繼續', 'CUE_CONTINUE') : '';
+    return playPage(`<div class="play-phase-label">第 ${game.round} ${kind === 'sun' ? '天' : '夜'}</div>${symbol(kind)}<h1 class="cue-title">${title}</h1>${buffer}${manual ? '<p class="cue-hint">讀出提示後繼續</p>' : ''}`, controls, 'center cue-panel');
   }
 
   function renderGame() {
@@ -1622,7 +1688,17 @@
       case 'ROLE_REVEAL': {
         const p = game.players[game.revealIndex], r = ROLES[p.role];
         const teammates = game.players.filter(x => x.camp === 'wolf' && x.id !== p.id);
-        return panel(`<div class="privacy-label">${icons.lock} ${p.id} 號玩家專屬</div><div class="identity-card"><span class="role-tag">你的身份</span>${roleIcon(p.role, 'identity-icon')}<h1>${r.name}</h1><p>${p.camp === 'wolf' ? '狼人陣營' : '好人陣營'}</p>${p.camp === 'wolf' ? `<div class="teammates"><span class="tiny muted">你的狼人隊友</span><br>${teammates.length ? teammates.map(x => `${x.id} 號`).join('、') : '本局沒有其他狼人隊友'}</div>` : ''}</div><p class="small muted">${r.description}</p><div class="actions">${btn('我記住了，隱藏身份', 'REMEMBER')}</div><p class="tiny muted gap-top no-margin">身份不會朗讀，也不能返回上一位。</p>`, 'center');
+        const camp = CAMP_PRESENTATION[p.camp];
+        const category = r.category === 'god' ? '神職' : r.category === 'villager' ? '村民' : null;
+        return panel(`<div class="privacy-label">${icons.lock} ${p.id} 號玩家專屬</div>
+          <div class="identity-card camp-${p.camp}">
+            <div class="identity-camp-banner"><strong>${camp.headline}</strong><span>${camp.name}</span></div>
+            ${roleIcon(p.role, 'identity-icon')}<h1>${r.name}</h1>
+            ${category ? `<span class="identity-category">${category}</span>` : ''}
+            <p class="identity-goal">${camp.goal}</p>
+            ${p.camp === 'wolf' ? `<div class="teammates"><span>你的狼人隊友</span><br><strong>${teammates.length ? teammates.map(x => `${x.id} 號`).join('、') : '本局沒有其他狼人隊友'}</strong></div>` : ''}
+          </div>
+          <p class="identity-description">${r.description}</p><div class="actions">${btn('我記住了，隱藏身份', 'REMEMBER')}</div><p class="tiny muted gap-top no-margin">身份不會朗讀，也不能返回上一位。</p>`, 'center private-role-panel');
       }
       case 'ROLE_COMPLETE':
         return panel(`${symbol('check')}${heading('所有身份已確認', '請把手機放到桌面中央。', '準備開始', true)}
@@ -1737,7 +1813,7 @@
     // 私密內容不使用 aria-live，以免輔助朗讀器自動念出身份。
     if (view === 'game' && active && !paused && !foreignUpdate && game.status !== 'finished') {
       toolbar.innerHTML = `<button type="button" class="icon-button" data-action="REPLAY" aria-label="重播公開主持詞" title="重播公開主持詞" ${!safeReplayPrompt() ? 'disabled' : ''}>${icons.audio}<span class="toolbar-label">重播</span></button><button type="button" class="icon-button" data-action="PAUSE" aria-label="暫停並遮蔽畫面" title="暫停">${icons.pause}</button>`;
-    } else toolbar.innerHTML = '<span class="version-pill">V1.4</span>';
+    } else toolbar.innerHTML = '<span class="version-pill">V1.5</span>';
     renderNotice(); renderFooter(); updateVoiceOptions(); updateTimerDOM();
   }
 
@@ -1789,7 +1865,8 @@
     if (!found) { savedEnvelope = null; render(); toast('沒有可恢復的遊戲存檔。'); return; }
     clearFlow();
     savedEnvelope = found; game = compactState(found.game);
-    clock = found.clock?.kind === 'slot' ? cleanSavedClock(found.clock) : null;
+    const restoredClock = cleanSavedClock(found.clock);
+    clock = restoredClock?.kind === 'slot' || isNightBuffer(game, restoredClock) ? restoredClock : null;
     active = true; view = 'game'; foreignUpdate = false;
     pauseReason = 'resume';
     paused = game.status !== 'finished'; autoKey = null; lastAnnounced = '';
@@ -1830,14 +1907,15 @@
       switch (action) {
         case 'UI_SELECT': case 'SELECT': case 'OPEN_DAY_ACTION': dispatch({ type: action, id: Number(button.dataset.id) }); break;
         case 'UI_WITCH_CHOICE': dispatch({ type: action, choice: button.dataset.choice }); break;
+        case 'CUE_CONTINUE': continueTextCue(); break;
         case 'NEW_GAME': beginSetup(); break;
         case 'HOME':
           view = 'home'; savedEnvelope = readEnvelope(); render(); break;
-        case 'SETUP_COUNT': view = 'setup-count'; render(); break;
-        case 'SETUP_ROLES': view = 'setup-roles'; render(); break;
+        case 'SETUP_COUNT': view = 'setup-count'; render(); window.scrollTo(0, 0); break;
+        case 'SETUP_ROLES': view = 'setup-roles'; render(); window.scrollTo(0, 0); break;
         case 'SETUP_CONFIRM':
           if (configErrors(draft).length) toast(configErrors(draft).join(' '));
-          else { view = 'setup-confirm'; render(); }
+          else { view = 'setup-confirm'; render(); window.scrollTo(0, 0); }
           break;
         case 'COUNT': {
           const count = Math.min(MAX_PLAYERS, Math.max(MIN_PLAYERS, draft.playerCount + Number(button.dataset.delta)));
@@ -1893,7 +1971,7 @@
         case 'REPLAY':
           if (!settings.audio) { toast('語音已關閉；可在暫停設定中開啟。'); break; }
           if (AUTO_PHASES.has(game.phase)) {
-            clearFlow(); ensureFlow();
+            clearFlow(); clock = null; render(); ensureFlow(); saveGame();
           } else {
             voice.speak(safeReplayPrompt()).then(result => {
               if (!result.ok && result.reason !== 'cancelled') notifyVoiceFailure();
