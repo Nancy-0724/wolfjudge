@@ -1,5 +1,5 @@
 /*
- * 狼人殺自動法官 V1.3.0
+ * 狼人殺自動法官 V1.4.0
  * 無外部函式庫、後端或網路請求；使用 GitHub Pages 即可。
  *
  * 區段：①角色與純規則 ②狀態轉換 ③儲存/語音/計時 ④畫面 ⑤事件。
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.3.0';
+  const VERSION = '1.4.0';
   const SCHEMA = 4;
   const RULESET = 'v1.3-five-min-evil-once-poison-first-day-retaliation';
   const MIN_PLAYERS = 5;
@@ -765,13 +765,180 @@
     } catch (_) { return false; }
   }
 
+  /* V1.4：UI 交易層。沿用上方 V1.3 純規則，不把「預覽選擇」當成正式行動。
+   * 每次提交只保存最後狀態；中間的舊確認狀態不顯示、不單獨存檔。
+   * ui 是選擇／公開提示資料，不參與角色、死亡與勝負判斷。
+   */
+  function pageKey(g) {
+    return `${g.round}:${g.phase}:${g.resolution?.lastWordsQueue?.[0] || ''}:${g.resolution?.currentSkill || ''}:${g.resolution?.lastSkillTarget || ''}`;
+  }
+  function defaultUI() { return { witchAction: null, alternative: null, notice: null }; }
+  function publicResultNotice(g) {
+    let text = '', kind = '';
+    if (g.phase === 'NIGHT_RESULT') {
+      const ids = g.night.deaths.map(id => g.deathEvents.find(d => d.id === id).playerId);
+      text = ids.length ? `昨晚 ${ids.map(id => `${id} 號`).join('、')} 死亡` : '昨晚是平安夜';
+      kind = 'night';
+    } else if (g.phase === 'DAY_EXECUTION') {
+      text = `${g.vote.target} 號被放逐`; kind = 'vote';
+    } else if (g.phase === 'DEATH_SKILL_RESULT') {
+      text = `${g.resolution.lastSkillTarget} 號玩家死亡`; kind = 'skill';
+    } else if (g.phase === 'DAY_ACTION_RESULT') {
+      const a = g.lastDayAction;
+      text = a.kind === 'self_destruct' ? `${a.actorId} 號自爆出局，本日取消投票` :
+        `${a.actorId} 號向 ${a.targetId} 號決鬥，${a.victimId} 號死亡`;
+      kind = a.kind;
+    } else if (g.phase === 'DAY_NO_EXECUTION') {
+      text = '本輪沒有人出局'; kind = 'vote';
+    }
+    return text ? { text, kind, announceAt: null } : null;
+  }
+  function compactState(input) {
+    let g = clone(input);
+    g.version = VERSION;
+    g.ui = { ...defaultUI(), ...(g.ui && typeof g.ui === 'object' ? g.ui : {}) };
+    if (![null, 'heal', 'poison', 'pass'].includes(g.ui.witchAction)) g.ui.witchAction = null;
+    if (![null, 'pass'].includes(g.ui.alternative)) g.ui.alternative = null;
+    if (g.ui.notice && (typeof g.ui.notice.text !== 'string' || typeof g.ui.notice.kind !== 'string')) g.ui.notice = null;
+    let notice = null;
+    // 正常只需 1～3 次；上限避免錯誤存檔產生無限轉場。
+    for (let i = 0; i < 12; i++) {
+      const phase = g.phase;
+      const result = publicResultNotice(g);
+      if (result) {
+        notice = result;
+        g = transition(g, { type: phase === 'DAY_NO_EXECUTION' ? 'CONTINUE_NO_VOTE' : 'CONTINUE_RESULT' });
+        continue;
+      }
+      const selection = { GUARD_CONFIRM: 'GUARD_SELECT', WOLF_CONFIRM: 'WOLF_SELECT',
+        SEER_CONFIRM: 'SEER_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT',
+        DAY_VOTE_CONFIRM: 'DAY_VOTE_RESULT', DEATH_SKILL_CONFIRM: 'DEATH_SKILL_SELECT' };
+      if (selection[phase]) { g.phase = selection[phase]; continue; }
+      if (phase === 'DEATH_SKILL_DECISION') {
+        g = transition(g, { type: 'ACTIVATE_SKILL' }); g.ui.alternative = null; continue;
+      }
+      if (phase === 'DAY_ACTION_DECISION') {
+        g = transition(g, { type: 'START_DAY_ACTION' }); continue;
+      }
+      if (phase === 'DEATH_SKILL_PASS_CONFIRM') {
+        g.phase = 'DEATH_SKILL_SELECT'; g.selected = null; g.ui.alternative = 'pass'; continue;
+      }
+      if (phase === 'SEER_PASS_CONFIRM') {
+        g.phase = 'SEER_SELECT'; g.selected = null; g.ui.alternative = 'pass'; continue;
+      }
+      if (phase === 'WITCH_HEAL_CONFIRM') {
+        g.phase = 'WITCH_HEAL'; g.ui.witchAction = 'heal'; continue;
+      }
+      if (phase === 'WITCH_POISON_CONFIRM') {
+        g.phase = 'WITCH_POISON'; g.ui.witchAction = 'poison'; continue;
+      }
+      if (phase === 'WITCH_PASS_CONFIRM') {
+        g.phase = 'WITCH_POISON'; g.selected = null; g.ui.witchAction = 'pass'; continue;
+      }
+      if (phase === 'WITCH_DONE' && (['heal', 'poison'].includes(g.night.witchNote) ||
+        (roleActor(g, 'witch')?.skills.heal > 0 || roleActor(g, 'witch')?.skills.poison > 0))) {
+        // 讀取 V1.3 已成功扣藥、但停在「完成」頁的存檔時，只結束操作，不能再次扣藥。
+        g = transition(g, { type: 'ACK_WITCH' }); continue;
+      }
+      break;
+    }
+    if (notice) {
+      notice.announceAt = pageKey(g);
+      g.ui.notice = g.status === 'finished' ? null : notice;
+    }
+    return g;
+  }
+  function interfaceTransition(previous, action) {
+    let g = compactState(previous);
+    const beforePhase = g.phase;
+    const steps = actions => {
+      for (const type of actions) g = transition(g, { type });
+    };
+    switch (action?.type) {
+      case 'UI_SELECT': {
+        if (g.phase === 'WITCH_HEAL' || g.phase === 'WITCH_POISON') {
+          assert(g.ui.witchAction === 'poison', '請先選擇「毒藥・毒人」。');
+          const witch = roleActor(g, 'witch');
+          assert(witch && witch.skills.poison > 0 && !g.night.usedHealTonight, '本晚不能使用毒藥。');
+          if (g.phase === 'WITCH_HEAL') steps(['SKIP_HEAL']);
+        }
+        g = transition(g, { type: 'SELECT', id: action.id });
+        g.ui.alternative = null;
+        break;
+      }
+      case 'UI_ALTERNATIVE':
+        assert(['SEER_SELECT', 'DEATH_SKILL_SELECT'].includes(g.phase), '本階段沒有這個選項。');
+        if (g.phase === 'SEER_SELECT') assert(maySkipSeer(g), '本局不可略過查驗。');
+        g.selected = null; g.ui.alternative = 'pass';
+        break;
+      case 'UI_WITCH_CHOICE': {
+        expect(g, 'WITCH_HEAL', 'WITCH_POISON');
+        const witch = roleActor(g, 'witch');
+        assert(witch && !g.night.usedHealTonight && g.night.poisonTarget === null, '本晚操作已完成。');
+        assert(['heal', 'poison', 'pass'].includes(action.choice), '請選擇本晚行動。');
+        if (action.choice === 'heal') {
+          assert(witch.skills.heal > 0 && g.night.wolfTarget !== null && g.night.wolfTarget !== witch.id,
+            '本晚不可使用解藥。');
+          g.phase = 'WITCH_HEAL';
+        } else if (action.choice === 'poison') {
+          assert(witch.skills.poison > 0, '毒藥已用完。');
+          g.phase = 'WITCH_POISON';
+        }
+        g.ui.witchAction = action.choice; g.selected = null;
+        break;
+      }
+      case 'UI_COMMIT': {
+        const phase = g.phase;
+        if (phase === 'WITCH_HEAL' || phase === 'WITCH_POISON') {
+          const choice = g.ui.witchAction;
+          if (choice === 'heal') {
+            g.phase = 'WITCH_HEAL'; steps(['CHOOSE_HEAL', 'CONFIRM_HEAL', 'ACK_WITCH']);
+          } else if (choice === 'poison') {
+            assert(g.phase === 'WITCH_POISON', '請先選擇毒殺對象。');
+            steps(['REVIEW', 'CONFIRM_POISON', 'ACK_WITCH']);
+          } else if (choice === 'pass') {
+            const witch = roleActor(g, 'witch');
+            assert(witch && !g.night.usedHealTonight && g.night.poisonTarget === null, '本晚操作已完成。');
+            // 路由回既有不使用流程，不新建第二套扣藥／行動規則。
+            if (g.phase === 'WITCH_HEAL') steps(['SKIP_HEAL']);
+            if (g.phase === 'WITCH_DONE') steps(['ACK_WITCH']);
+            else steps(['PASS_POISON', 'CONFIRM_PASS']);
+          } else throw new Error('請選擇救人、毒人或今晚不用藥。');
+        } else if (phase === 'DEATH_SKILL_SELECT' && g.ui.alternative === 'pass') {
+          steps(['BACK', 'PASS_SKILL', 'CONFIRM_PASS_SKILL']);
+        } else if (phase === 'SEER_SELECT' && g.ui.alternative === 'pass') {
+          steps(['PASS_SEER', 'CONFIRM_PASS_SEER']);
+        } else {
+          const confirms = { GUARD_SELECT: 'CONFIRM_GUARD', WOLF_SELECT: 'CONFIRM_WOLF',
+            SEER_SELECT: 'CONFIRM_SEER', KNIGHT_SELECT: 'CONFIRM_DUEL',
+            DEATH_SKILL_SELECT: 'CONFIRM_SKILL', DAY_VOTE_RESULT: 'CONFIRM_VOTE' };
+          assert(confirms[phase], '本階段無法提交選擇。');
+          steps(['REVIEW', confirms[phase]]);
+        }
+        g.ui.witchAction = null; g.ui.alternative = null;
+        break;
+      }
+      default:
+        g = transition(g, action);
+    }
+    // UI 選擇也存檔，但不扣藥、不查驗、不標記死亡。
+    if (g.revision === previous.revision) { g.revision += 1; g.updatedAt = Date.now(); }
+    if (g.round !== previous.round) g.ui = defaultUI();
+    // 新夜間角色不沿用前一角色的選項。
+    if (beforePhase !== g.phase && AUTO_PHASES.has(g.phase)) {
+      g.ui.witchAction = null; g.ui.alternative = null; g.ui.notice = null;
+    }
+    return compactState(g);
+  }
+
   // Node.js 可直接測試純規則；正式瀏覽器不暴露可讀取身份的全域物件。
   if (typeof module === 'object' && module.exports) {
     module.exports = { VERSION, ROLES, NIGHT_STEPS, createGame, transition, configErrors,
       getWinner, resolveNight, canDeathSkill, eligibleTargets, validGame, recommendedRoles,
       roleActor, currentDeath, isNight, isSlotPhase, configuredNightSteps, endIfWinner,
       availableDayAction, markDeath, makeResolution, advanceResolution, startNight, ROLE_ORDER, SCHEMA, RULESET,
-      MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, maySkipSeer, nightOpenText };
+      MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, maySkipSeer, nightOpenText,
+      interfaceTransition, compactState, pageKey, defaultUI };
   }
   if (typeof document === 'undefined') return;
 
@@ -810,6 +977,7 @@
   let dialogCallback = null;
   let lastFocus = null;
   let actionBusy = false;
+  let returnTimer = null;
 
   const icons = {
     audio: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M11 4 5.8 8H3v8h2.8L11 20V4Z"/><path d="M15 8a6 6 0 0 1 0 8m3-11a10 10 0 0 1 0 14"/></svg>',
@@ -870,13 +1038,14 @@
       <p><strong>惡靈騎士／本版採用值：</strong>夜間免死，狼刀、毒藥及同守同救無效；參與共同狼刀但不可自爆。全局一次被動反傷，僅由預言家查驗或女巫下毒觸發，<strong>同晚驗毒只反傷女巫</strong>；毒藥仍消耗，反傷不可被守護或解藥阻擋。守護、解藥本身不觸發反傷。反傷用過後仍夜間免死。夜間全部結算後才公布死亡，不提示反傷或免疫是否發動，也不向本人顯示剩餘次數。</p>
       <p><strong>惡靈與白天技能：</strong>被投票放逐、騎士決鬥、獵人或狼王帶人，會正常出局，不反傷對方。<strong>本網站天亮後執行的帶人一律視為白天技能</strong>，包含原本在夜間死亡的獵人或狼王。惡靈本身沒有死亡帶人能力。</p>
       <p><strong>自爆：</strong>普通狼人與狼王皆可在白天發言時點自己的號碼自爆；自爆者沒有遺言，取消本日投票。<strong>狼王自爆可以帶人</strong>；未終局則完整處理可用技能與死亡流程後下一夜。進入投票／PK 就不能自爆或決鬥。</p>
-      <p><strong>白天操作：</strong>號碼不標身份，各玩家只點自己。啟動後仍須最終確認才生效。先完成最終確認的合法動作先結算，不接受中途插入或追溯取消。自行投票與平票 PK，只輸入號碼或「沒有人出局」。沒有警長。</p>
+      <p><strong>白天操作：</strong>號碼不標身份，各玩家只點自己。選擇後只需一次提交，不另外跳確認頁。先完成最終確認的合法動作先結算，不接受中途插入或追溯取消。自行投票與平票 PK，只輸入號碼或「沒有人出局」。沒有警長。</p>
       <p><strong>死亡技能：</strong>獵人被狼刀、放逐、帶人或同守同救致死可帶一名存活玩家，含毒死因不行。技能可放棄。公開介面只問「你要啟動技能嗎？」，不顯示身份或專屬圖示。</p>
       <p><strong>屠邊與 B 反擊規則：</strong>全部狼人陣營死亡，優先判好人勝；否則村民全滅或神職全滅，狼人勝。夜間效果同批結算。<strong>出現勝利條件但仍有獵人合法反擊時，跳過遺言、先反擊再判勝負。</strong>狼王沒有這項保障：最後狼王出局（含自爆）直接好人勝，不再帶人。</p>
       <p><strong>遺言：</strong>尚未終局的一般夜死、放逐及技能帶人有遺言；騎士決鬥與自爆者沒有。終局前反擊不安排遺言，結束後也不補。多人夜死按號碼順序處理。</p>
       <p><strong>操作時間：</strong>完成可立即結束；逾時只低頻閃紅催促，仍能選擇、返回與確認。已配置但已死亡的夜間角色保留等待時段，時間差仍可能成為推理線索。</p>
       <p><strong>資訊保護：</strong>私密身份、夜間目標與查驗結果不朗讀。切換 App 或暫停會遮蔽。沒有操作碼，網站不能驗證拿手機的人，禁止試點他人號碼；所有玩家仍須遵守閉眼規則。</p>
-      <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。V1.2 及更早的舊局不相容，更新後請開新局。</p>
+      <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版沿用 V1.3 的規則與存檔。V1.2 及更早的舊局不相容。</p>
+      <p><strong>V1.4 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。每段睜眼／閉眼主持詞播完立即銜接；文字模式需由玩家讀出提示後按「繼續」。開局查看身份仍須本人逐一確認。</p>
     </div></details>`;
   }
 
@@ -904,7 +1073,7 @@
       if (!raw) return null;
       const item = JSON.parse(raw);
       if (!item || !validGame(item.game)) {
-        saveIssue = '存檔無法讀取或不屬於 V1.3 規則。此版新增惡靈騎士與反傷狀態，請開始新遊戲；確認分配身份後才會覆蓋舊存檔。';
+        saveIssue = '存檔無法讀取，或不是相容的 V1.3／V1.4 存檔。請開始新遊戲；確認分配身份後才會覆蓋舊存檔。';
         return null;
       }
       return item;
@@ -995,7 +1164,7 @@
   }
   let voice = null;
 
-  function publicPrompt(g) {
+  function corePublicPrompt(g) {
     if (!g) return '';
     const step = NIGHT_STEPS.find(s => s.wake === g.phase || s.sleep === g.phase);
     if (step) return g.phase === step.wake ? nightOpenText(g, step) : step.closeText;
@@ -1007,15 +1176,16 @@
         return ids.length ? `昨晚${ids.map(id => `${id}號`).join('、')}玩家死亡。` : '昨晚是平安夜。';
       }
       case 'LAST_WORDS': return `請${g.resolution.lastWordsQueue[0]}號玩家發表遺言。`;
+      case 'DEATH_SKILL_SELECT':
       case 'DEATH_SKILL_DECISION': return `請${currentDeath(g).playerId}號玩家確認畫面。`;
       case 'DEATH_SKILL_RESULT': return `${g.resolution.lastSkillTarget}號玩家死亡。`;
-      case 'DAY_DISCUSSION': return '現在進入白天發言。需要啟動技能或自爆的玩家，請點自己的號碼。';
+      case 'DAY_DISCUSSION': return '現在進入白天發言。';
       case 'DAY_ACTION_RESULT': {
         const a = g.lastDayAction;
         return a.kind === 'self_destruct' ? `${a.actorId}號玩家自爆出局。本日取消投票。` :
           `${a.actorId}號向${a.targetId}號發動決鬥。${a.victimId}號玩家死亡。`;
       }
-      case 'DAY_VOTE_RESULT': return '請自行完成投票與平票PK，再輸入最終結果。';
+      case 'DAY_VOTE_RESULT': return '請輸入最終投票結果。';
       case 'DAY_EXECUTION': return `${g.vote.target}號玩家被放逐。`;
       case 'DAY_NO_EXECUTION': return '本輪沒有人出局。';
       case 'NEXT_NIGHT': return '白天結束。請把手機放回桌面中央，準備下一夜。';
@@ -1027,19 +1197,25 @@
       default: return '';
     }
   }
+  function publicPrompt(g) {
+    if (!g) return '';
+    const prefix = g.ui?.notice?.announceAt === pageKey(g) ? `${g.ui.notice.text}。` : '';
+    return prefix + corePublicPrompt(g);
+  }
   function safeReplayPrompt() {
     if (isSlotPhase(game)) return nightOpenText(game, activeStep(game));
     return publicPrompt(game);
   }
   function announceKey() {
     if (!game) return '';
-    return `${game.round}:${game.phase}:${game.resolution?.lastWordsQueue?.[0] || ''}:${game.resolution?.currentSkill || ''}:${game.resolution?.lastSkillTarget || ''}`;
+    return `${pageKey(game)}:${game.ui?.notice?.announceAt === pageKey(game) ? game.ui.notice.text : ''}`;
   }
   function notifyVoiceFailure() {
     voiceIssue = '語音未成功播放。請檢查手機音量、選擇中文語音，或改用文字模式。';
     renderNotice();
   }
   function clearFlow() {
+    clearTimeout(returnTimer); returnTimer = null;
     flowToken += 1;
     stopClock();
     autoKey = null;
@@ -1057,7 +1233,10 @@
   }
   function runClock() {
     if (!active || paused || foreignUpdate || !clock || intervalId !== null) return;
-    if (clock.remaining <= 0) { expireClock(); return; }
+    if (clock.remaining <= 0) {
+      if (clock.kind === 'slot' && !game.night.completed[game.night.activeRole]) { updateTimerDOM(0); return; }
+      expireClock(); return;
+    }
     clockEnd = performance.now() + clock.remaining;
     lastCheckpoint = performance.now();
     updateTimerDOM();
@@ -1110,16 +1289,24 @@
       const key = `auto:${game.round}:${game.phase}`;
       if (autoKey === key) return;
       autoKey = key;
-      const duration = game.phase === 'NIGHT_RESOLVE' ? 1200 :
-        game.phase === 'NIGHT_START' ? 4000 : game.phase === 'DAWN' ? 2500 : 3000;
-      if (!clock || clock.key !== key) setClock('auto', key, duration);
+      stopClock(); clock = null;
       const token = ++flowToken;
-      const text = publicPrompt(game);
-      // 先播完整主持詞再倒數；語音不支援時停在遮蔽頁，不悄悄跳過指示。
-      voice.speak(text).then(result => {
-        if (token !== flowToken || paused || !active) return;
-        if (!result.ok && result.reason !== 'cancelled') { notifyVoiceFailure(); pauseGame('audio'); return; }
-        runClock();
+      const current = () => token === flowToken && active && !paused && !foreignUpdate;
+      // 結算沒有主持詞，立即銜接。不得在此之前略過角色的私密操作。
+      if (game.phase === 'NIGHT_RESOLVE') {
+        Promise.resolve().then(() => { if (current()) dispatch({ type: 'AUTO' }); });
+        return;
+      }
+      // 無語音時保留一個明確的前進鍵，避免閉眼提示閃過就露出操作頁。
+      if (!settings.audio) return;
+      voice.speak(publicPrompt(game)).then(result => {
+        if (!current()) return;
+        if (!result.ok) {
+          if (result.reason !== 'cancelled') { notifyVoiceFailure(); pauseGame('audio'); }
+          return;
+        }
+        // onend 後直接開放操作或播放下一句，沒有額外 3 秒等待。
+        dispatch({ type: 'AUTO' });
       });
     } else if (isSlotPhase(game)) {
       autoKey = null;
@@ -1129,11 +1316,24 @@
     } else {
       if (clock) { stopClock(); clock = null; }
       autoKey = null;
+      if (game.phase === 'DAY_ACTION_UNAVAILABLE') {
+        if (returnTimer !== null) return;
+        const token = flowToken;
+        returnTimer = setTimeout(() => {
+          returnTimer = null;
+          if (token === flowToken && active && !paused && !foreignUpdate && game.phase === 'DAY_ACTION_UNAVAILABLE') {
+            dispatch({ type: 'CANCEL_DAY_ACTION' });
+          }
+        }, 1400);
+        return;
+      }
       const key = announceKey();
       const text = publicPrompt(game);
       if (text && lastAnnounced !== key) {
         lastAnnounced = key;
+        const token = flowToken;
         voice.speak(text).then(result => {
+          if (token !== flowToken || paused || !active) return;
           if (!result.ok && result.reason !== 'cancelled') notifyVoiceFailure();
         });
       }
@@ -1229,7 +1429,7 @@
     const stored = savedEnvelope?.game;
     const resume = stored ? `<div class="resume-card"><div class="resume-text"><strong>${stored.status === 'finished' ? '上一局已結束' : '有一局尚未結束'}</strong><p>${stored.round ? `第 ${stored.round} 回合` : '身份分配階段'} · ${stored.config.playerCount} 人</p></div></div>` : '';
     return `<div class="page"><section class="panel home-panel">
-      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.3</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
+      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.4</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
       <p class="home-copy">九種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
       ${resume}<div class="actions">${stored ? btn(stored.status === 'finished' ? '查看上一局結果' : '繼續上次遊戲', 'LOAD_GAME') : ''}${btn(`開始新遊戲 ${icons.arrow}`, 'NEW_GAME', stored ? 'secondary' : 'primary')}</div>
       <div class="home-features"><div class="feature"><strong>一機輪流</strong>不用實體身份牌</div><div class="feature"><strong>語音帶局</strong>夜間流程自動推進</div><div class="feature"><strong>自動結算</strong>記錄死亡與勝負</div></div>
@@ -1287,60 +1487,131 @@
       ${note('若目前為夜間，請先確認其他玩家都已閉眼。只有原操作玩家可以繼續查看。')}
       <div class="actions">${foreignUpdate ? btn('載入最新進度', 'RELOAD_LATEST') : btn(pauseReason === 'audio' ? '重試語音並繼續' : '由原操作玩家繼續', 'RESUME')}
         ${pauseReason === 'audio' ? btn('改用文字模式繼續', 'RESUME_TEXT', 'secondary') : ''}</div>
-      ${!foreignUpdate ? `<details class="rules-details"><summary>語音與螢幕設定</summary><div class="rules-content">${audioSettingsHTML(false)}</div></details><div class="center"><button type="button" class="text-button" data-action="ABANDON">放棄並清除此局</button></div>` : ''}`, 'center');
+      ${!foreignUpdate ? `<details class="rules-details"><summary>語音與螢幕設定</summary><div class="rules-content">${audioSettingsHTML(false)}</div></details>${rulesHTML()}<div class="center"><button type="button" class="text-button" data-action="ABANDON">放棄並清除此局</button></div>` : ''}`, 'center');
   }
   function progressDots() {
     return `<div class="progress-dots" aria-label="已確認 ${game.players.filter(p => p.roleViewed).length} 位身份">${game.players.map(p => `<span class="${p.roleViewed ? 'done' : ''}"></span>`).join('')}</div>`;
   }
   function ribbon() {
-    const steps = configuredNightSteps(game);
-    const index = steps.findIndex(s => s.role === game.night?.activeRole);
     const role = game.night.activeRole;
-    return `<div class="phase-ribbon"><span>第 ${game.round} 夜</span><div class="phase-stepper" aria-hidden="true">${steps.map((_, i) => `<span class="${i <= index ? 'on' : ''}"></span>`).join('')}</div><span class="phase-role">${roleIcon(role, 'mini-icon')}${activeStep(game).label}</span></div>`;
-  }
-  function timerHTML() {
     const snapshot = clock?.kind === 'slot' ? clockSnapshot() : { remaining: game.config.nightSeconds * 1000 };
-    return `<div class="timer-card"><div class="timer-heading"><span>本角色操作時段</span><span class="timer-number" id="timer-number">${Math.ceil(snapshot.remaining / 1000)} 秒</span></div><div class="timer-track" aria-hidden="true"><div class="timer-fill" id="timer-fill"></div></div><p class="timer-note">${game.phase === 'NIGHT_WAIT' ? '等待本段主持流程結束，請保持閉眼。' : '完成後立即結束；逾時仍可繼續操作。'}</p></div>`;
+    return `<div class="phase-ribbon play-ribbon"><span class="phase-role">${roleIcon(role, 'mini-icon')}第 ${game.round} 夜 · ${activeStep(game).label}</span><span class="timer-number" id="timer-number">${Math.ceil(snapshot.remaining / 1000)} 秒</span></div><div class="timer-track play-timer-track" aria-hidden="true"><div class="timer-fill" id="timer-fill"></div></div>`;
+  }
+  function publicNoticeHTML() {
+    const n = game.ui?.notice;
+    return n ? `<div class="public-result-strip">${esc(n.text)}</div>` : '';
+  }
+  function playPage(content, actions = '', cls = '') {
+    return `<div class="page play-page"><section class="panel play-panel ${cls}">${content}</section>${actions ? `<div class="action-dock">${actions}</div>` : ''}</div>`;
+  }
+  function playHeading(title, detail = '', actorId = null) {
+    const phase = isNight(game) ? ribbon() : `<div class="play-phase-label">第 ${game.round} 天${actorId !== null ? ` · ${actorId} 號玩家` : ''}</div>`;
+    return `${phase}<div class="play-heading"><h1>${title}</h1>${detail ? `<p>${detail}</p>` : ''}</div>`;
   }
   function grid() {
     const allowed = eligibleTargets(game);
-    return `<div class="players-grid" role="group" aria-label="玩家號碼">${game.players.map(p => {
+    return `<div class="players-grid play-grid" data-player-count="${game.players.length}" role="group" aria-label="玩家號碼">${game.players.map(p => {
       const disabled = !allowed.includes(p.id);
-      const selected = p.id === game.selected;
-      const meta = !p.alive ? '已出局' : disabled ? '不可選' : '號玩家';
-      return `<button type="button" class="player-button ${selected ? 'selected' : ''} ${!p.alive ? 'dead' : ''}" data-action="SELECT" data-id="${p.id}" aria-label="${p.id} 號${!p.alive ? '，已出局' : disabled ? '，不可選' : ''}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}><span class="number">${String(p.id).padStart(2, '0')}</span><span class="player-meta">${meta}</span></button>`;
+      const selected = p.id === game.selected && !game.ui?.alternative;
+      return `<button type="button" class="player-button ${selected ? 'selected' : ''} ${p.alive ? '' : 'dead'}" data-action="UI_SELECT" data-id="${p.id}" aria-label="${p.id} 號${!p.alive ? '，已出局' : disabled ? '，不可選' : ''}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}><span class="number">${p.id}</span>${!p.alive ? '<span class="dead-mark" aria-hidden="true">×</span>' : ''}</button>`;
     }).join('')}</div>`;
   }
-  function selectionPage(title, subtitle, extra = '') {
-    const chosen = game.selected !== null;
-    const hint = chosen ? `已選擇 ${game.selected === 0 ? (game.phase === 'GUARD_SELECT' ? '今晚不守護' : '沒有人出局') : `${game.selected} 號`}；尚未確認。` : '請先選擇一個號碼。';
-    return panel(`${isNight(game) ? ribbon() : `<span class="eyebrow">第 ${game.round} 天</span>`}${heading(title, subtitle)}${grid()}${extra}
-      <div class="selection-hint">${hint}</div><div class="actions">${btn('確認選擇', 'REVIEW', 'primary', chosen ? '' : 'disabled')}
-      ${['DEATH_SKILL_SELECT', 'KNIGHT_SELECT'].includes(game.phase) ? btn('返回', 'BACK', 'secondary') : ''}</div>${isNight(game) ? timerHTML() : ''}`);
-  }
-  function confirmPage(title, id, action, subtitle = '', back = 'BACK') {
-    return panel(`${isNight(game) ? ribbon() : ''}${heading(title, subtitle, '', true)}${id === 0 ? `<div class="target-display"><h2 class="no-margin">${game.phase === 'GUARD_CONFIRM' ? '今晚不守護' : '沒有人出局'}</h2></div>` : targetDisplay(id)}
-      <div class="actions two">${btn('返回', back, 'secondary')}${btn('確認', action)}</div>${isNight(game) ? timerHTML() : ''}`, 'center');
-  }
-  function potionStatus(witch) {
-    return `<div class="potion-status"><div class="potion ${witch.skills.heal ? '' : 'spent'}"><span>解藥</span><strong>${witch.skills.heal ? '1 / 1' : '已用完'}</strong></div><div class="potion ${witch.skills.poison ? '' : 'spent'}"><span>毒藥</span><strong>${witch.skills.poison ? '1 / 1' : '已用完'}</strong></div></div>`;
-  }
   function discussionGrid() {
-    return `<div class="players-grid discussion-grid" role="group" aria-label="玩家號碼，請只點自己的號碼">${game.players.map(p =>
-      `<button type="button" class="player-button ${p.alive ? '' : 'dead'}" data-action="OPEN_DAY_ACTION" data-id="${p.id}" aria-label="${p.id} 號玩家${p.alive ? '' : '，已出局'}" ${p.alive ? '' : 'disabled'}><span class="number">${String(p.id).padStart(2, '0')}</span><span class="player-meta">${p.alive ? '號玩家' : '已出局'}</span></button>`
+    return `<div class="players-grid play-grid discussion-grid" data-player-count="${game.players.length}" role="group" aria-label="玩家號碼，請只點自己的號碼">${game.players.map(p =>
+      `<button type="button" class="player-button ${p.alive ? '' : 'dead'}" data-action="OPEN_DAY_ACTION" data-id="${p.id}" aria-label="${p.id} 號玩家${p.alive ? '' : '，已出局'}" ${p.alive ? '' : 'disabled'}><span class="number">${p.id}</span>${!p.alive ? '<span class="dead-mark" aria-hidden="true">×</span>' : ''}</button>`
     ).join('')}</div>`;
+  }
+  function choiceButton(label, action, selected, extra = '') {
+    return btn(label, action, `secondary choice-option ${selected ? 'selected' : ''}`, `aria-pressed="${selected}" ${extra}`);
+  }
+  function selectionPage(title, detail = '') {
+    let label = '請先選擇號碼', extra = '', actorId = null;
+    const selected = game.selected;
+    const alt = game.ui?.alternative === 'pass';
+    switch (game.phase) {
+      case 'GUARD_SELECT': {
+        const actor = roleActor(game, 'guard');
+        const last = actor.skills.lastGuardRound === game.round - 1 ? actor.skills.lastGuardTarget : null;
+        detail = last !== null ? `上晚守 ${last} 號，本晚不可連守` : '';
+        label = selected === 0 ? '確定今晚不守護' : selected !== null ? `確定守護 ${selected} 號` : label;
+        extra = choiceButton('今晚不守護', 'UI_SELECT', selected === 0, 'data-id="0"');
+        break;
+      }
+      case 'WOLF_SELECT': label = selected !== null ? `確定襲擊 ${selected} 號` : label; break;
+      case 'SEER_SELECT':
+        label = alt ? '確定今晚不查驗' : selected !== null ? `查驗 ${selected} 號` : label;
+        if (maySkipSeer(game)) extra = choiceButton('今晚不查驗', 'UI_ALTERNATIVE', alt);
+        break;
+      case 'DEATH_SKILL_SELECT':
+        actorId = currentDeath(game).playerId;
+        label = alt ? '確定不啟動' : selected !== null ? `確定帶走 ${selected} 號` : '選擇目標或不啟動';
+        extra = choiceButton('不啟動', 'UI_ALTERNATIVE', alt);
+        break;
+      case 'KNIGHT_SELECT':
+        actorId = game.dayAction.actorId;
+        label = selected !== null ? `確定與 ${selected} 號決鬥` : label;
+        break;
+      case 'DAY_VOTE_RESULT':
+        label = selected === 0 ? '確定沒有人出局' : selected !== null ? `確定放逐 ${selected} 號` : label;
+        extra = choiceButton('沒有人出局', 'UI_SELECT', selected === 0, 'data-id="0"');
+        break;
+    }
+    const ready = selected !== null || alt;
+    const actions = btn(label, 'UI_COMMIT', 'primary', ready ? '' : 'disabled') +
+      (game.phase === 'KNIGHT_SELECT' ? btn('返回發言', 'CANCEL_DAY_ACTION', 'secondary') : '');
+    return playPage(`${!isNight(game) ? publicNoticeHTML() : ''}${playHeading(title, detail, actorId)}${grid()}${extra}`, actions);
+  }
+  function potionIcon(kind) {
+    // 形狀與文字皆可辨識：寬圓瓶＋十字／窄方瓶＋骷髏，不只依靠綠紫配色。
+    const art = kind === 'heal'
+      ? '<path d="M21 7h22v9H21zM24 16v7c-10 4-14 11-14 21 0 9 7 13 22 13s22-4 22-13c0-10-4-17-14-21v-7"/><path d="M27 31h10v7h7v10h-7v7H27v-7h-7V38h7z"/>'
+      : '<path d="M24 5h16v12H24zM24 17l-9 10v30h34V27L40 17"/><path d="M32 28c-9 0-13 5-13 11 0 5 4 8 8 9v6h10v-6c4-1 8-4 8-9 0-6-4-11-13-11Z"/><circle cx="27" cy="38" r="2"/><circle cx="37" cy="38" r="2"/><path d="m30 44 2-3 2 3M30 49v5m4-5v5"/>';
+    return `<svg viewBox="0 0 64 64" fill="none" stroke="currentColor" stroke-width="2.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${art}</svg>`;
+  }
+  function renderWitch() {
+    const witch = roleActor(game, 'witch');
+    const healRemaining = witch.skills.heal > 0;
+    // 未持有解藥時，連 data 屬性、可及名稱都不寫入狼刀號碼。
+    const target = healRemaining ? game.night.wolfTarget : null;
+    const canHeal = healRemaining && target !== null && target !== witch.id;
+    const canPoison = witch.skills.poison > 0;
+    const action = game.ui?.witchAction;
+    const selected = game.selected;
+    const healDetail = !healRemaining ? '已用完' : target === witch.id ? '不可自救' : target === null ? '本晚無可救對象' : `救 ${target} 號`;
+    const poisonDetail = canPoison ? '選擇毒殺對象' : '已用完';
+    const cards = `<div class="potion-actions" role="group" aria-label="本晚用藥">
+      <button type="button" class="potion-action heal ${action === 'heal' ? 'chosen' : ''}" data-action="UI_WITCH_CHOICE" data-choice="heal" aria-pressed="${action === 'heal'}" ${canHeal ? '' : 'disabled'}>
+        <span class="potion-art">${potionIcon('heal')}</span><span class="potion-label"><strong>解藥・救人</strong><span>${healDetail}</span></span><span class="potion-check" aria-hidden="true">${action === 'heal' ? '✓' : ''}</span>
+      </button>
+      <button type="button" class="potion-action poison ${action === 'poison' ? 'chosen' : ''}" data-action="UI_WITCH_CHOICE" data-choice="poison" aria-pressed="${action === 'poison'}" ${canPoison ? '' : 'disabled'}>
+        <span class="potion-art">${potionIcon('poison')}</span><span class="potion-label"><strong>毒藥・毒人</strong><span>${poisonDetail}</span></span><span class="potion-check" aria-hidden="true">${action === 'poison' ? '✓' : ''}</span>
+      </button>
+    </div>`;
+    let label = '請選擇本晚行動';
+    let ready = false;
+    if (action === 'heal' && canHeal) { label = `使用解藥救 ${target} 號`; ready = true; }
+    if (action === 'poison') { label = selected !== null ? `使用毒藥毒 ${selected} 號` : '請選擇毒殺對象'; ready = selected !== null && canPoison; }
+    if (action === 'pass') { label = '確定今晚不用藥'; ready = true; }
+    const bothEmpty = !healRemaining && !canPoison;
+    const title = healRemaining && target !== null ? `今晚被刀：${target} 號` : '本晚用藥';
+    const poisonGrid = action === 'poison' ? `<section class="poison-targets" aria-label="毒殺對象"><h2>${potionIcon('poison')}毒殺對象</h2>${grid()}</section>` : '';
+    const skip = !bothEmpty ? choiceButton('今晚不用藥', 'UI_WITCH_CHOICE', action === 'pass', 'data-choice="pass"') : '';
+    const controls = bothEmpty ? btn('結束操作', 'ACK_WITCH') : btn(label, 'UI_COMMIT', action === 'heal' ? 'commit-heal' : action === 'poison' ? 'commit-poison' : 'primary', ready ? '' : 'disabled');
+    return playPage(`${playHeading(title)}${cards}${poisonGrid}${skip}`, controls, 'witch-panel');
   }
   function autoPage() {
     const opening = NIGHT_STEPS.find(s => s.wake === game.phase);
     const closing = NIGHT_STEPS.find(s => s.sleep === game.phase);
-    let title = '', sub = '', kind = 'moon';
-    if (game.phase === 'NIGHT_START') { title = '天黑請閉眼'; sub = '手機放在桌面中央，等待你的角色被呼喚。'; }
-    if (opening) { title = `${opening.label}請睜眼`; sub = '其他玩家請保持閉眼。'; }
-    if (closing) { title = `${closing.label}請閉眼`; sub = '將手機放回中央，等待下一段主持詞。'; }
-    if (game.phase === 'NIGHT_RESOLVE') { title = '夜晚即將結束'; sub = '請保持閉眼，等待天亮。'; }
-    if (game.phase === 'DAWN') { title = '天亮請睜眼'; sub = '所有玩家都可以查看畫面。'; kind = 'sun'; }
-    return panel(`<span class="eyebrow">第 ${game.round} ${kind === 'sun' ? '天' : '夜'}</span>${opening || closing ? roleSymbol((opening || closing).role) : symbol(kind)}<h1 class="title-serif">${title}</h1><p class="muted">${sub}</p><div class="auto-status" id="auto-countdown">${settings.audio && publicPrompt(game) ? '主持詞播放中…' : '流程將自動前進…'}</div>`, 'center instruction-page');
+    let title = '', kind = 'moon';
+    if (game.phase === 'NIGHT_START') title = '天黑請閉眼';
+    if (opening) title = `${opening.label}請睜眼`;
+    if (closing) title = `${closing.label}請閉眼`;
+    if (game.phase === 'NIGHT_RESOLVE') title = '請保持閉眼';
+    if (game.phase === 'DAWN') { title = '天亮請睜眼'; kind = 'sun'; }
+    const controls = !settings.audio && game.phase !== 'NIGHT_RESOLVE' ? btn('繼續', 'AUTO') : '';
+    return playPage(`<div class="play-phase-label">第 ${game.round} ${kind === 'sun' ? '天' : '夜'}</div>${symbol(kind)}<h1 class="cue-title">${title}</h1>${!settings.audio && game.phase !== 'NIGHT_RESOLVE' ? '<p class="cue-hint">讀出提示後繼續</p>' : ''}`, controls, 'center cue-panel');
   }
+
   function renderGame() {
     if (AUTO_PHASES.has(game.phase)) return autoPage();
     switch (game.phase) {
@@ -1359,116 +1630,33 @@
           <div class="actions">${btn(`${icons.audio} 測試主持語音`, 'TEST_VOICE', 'secondary')}${btn(settings.audio ? '啟用語音並開始遊戲' : '以文字模式開始遊戲', 'START')}</div>
           <div class="center"><button type="button" class="text-button" data-action="TOGGLE_AUDIO">${settings.audio ? '改用文字模式' : '改用語音模式'}</button></div>
           <p class="tiny muted no-margin">文字模式需有人讀出畫面指示。請先確認每位玩家聽得見語音。</p>`, 'center');
-      case 'GUARD_SELECT': {
-        const actor = roleActor(game, 'guard');
-        const last = actor.skills.lastGuardRound === game.round - 1 ? actor.skills.lastGuardTarget : null;
-        const message = last === null ? '上一晚未守護任何玩家；本晚可選擇存活玩家。' : `上一晚守護 ${last} 號，本晚不可再次守護同一人。`;
-        return selectionPage('今晚要守護誰？', '可以守自己，或選擇今晚不守護。',
-          `${note(message)}<div class="actions">${btn('今晚不守護', 'SELECT', `secondary no-execution ${game.selected === 0 ? 'selected' : ''}`, `data-id="0" aria-pressed="${game.selected === 0}"`)}</div>`);
-      }
-      case 'GUARD_CONFIRM':
-        return confirmPage('確認本晚守護選擇', game.selected, 'CONFIRM_GUARD', '同守同救仍死亡；確認後不可撤銷。');
-      case 'WOLF_SELECT':
-        return selectionPage('請選擇襲擊對象', '所有存活狼人共同決定，由其中一位操作。');
-      case 'WOLF_CONFIRM':
-        return confirmPage('今晚要襲擊這位玩家？', game.selected, 'CONFIRM_WOLF', '確認前可以返回重新選擇。');
-      case 'SEER_SELECT':
-        return selectionPage('請選擇查驗對象', '只能查驗其他存活玩家，結果不會朗讀。',
-          maySkipSeer(game) ? `<div class="actions">${btn('今晚不查驗', 'PASS_SEER', 'secondary')}</div>` : '');
-      case 'SEER_PASS_CONFIRM':
-        return panel(`${ribbon()}${symbol('moon', true)}${heading('今晚不查驗？', '本晚不取得查驗資訊，也不會因查驗觸發反傷。', '', true)}<div class="actions two">${btn('返回', 'BACK', 'secondary')}${btn('確認不查驗', 'CONFIRM_PASS_SEER')}</div>${timerHTML()}`, 'center');
-      case 'SEER_CONFIRM':
-        return confirmPage('確定要查驗這位玩家？', game.selected, 'CONFIRM_SEER', '看到結果後，本晚不能改查其他人。');
+      case 'GUARD_SELECT': return selectionPage('今晚守護誰？');
+      case 'WOLF_SELECT': return selectionPage('今晚襲擊誰？');
+      case 'SEER_SELECT': return selectionPage('今晚查驗誰？');
       case 'SEER_RESULT':
-        return panel(`${ribbon()}<span class="eyebrow">私密查驗結果</span><div class="big-player">${game.night.seerTarget}<small>號</small></div><div class="result-emblem">${game.night.seerResult === 'wolf' ? '狼人' : '好人'}</div><p class="small muted">只顯示陣營，不公開具體身份。</p><div class="actions">${btn('我知道了，結束操作', 'ACK_SEER')}</div>${timerHTML()}`, 'center');
-      case 'WITCH_HEAL': {
-        const witch = roleActor(game, 'witch');
-        // 即使載入異常階段，解藥用完也不能把狼刀資訊寫進 DOM。
-        const maySee = witch.skills.heal > 0;
-        const target = maySee ? game.night.wolfTarget : null;
-        const self = maySee && target === witch.id;
-        const canHeal = maySee && target !== null && !self;
-        const explanation = !maySee ? '解藥已用完，不再提供當晚被刀號碼。' : self ?
-          '今晚被襲擊的是你。不可自救，仍可決定是否使用毒藥。' :
-          '是否使用解藥？使用後本晚不能再用毒藥；同守同救仍死亡。';
-        return panel(`${ribbon()}${heading(maySee ? '今晚狼人襲擊的是' : '解藥已用完', '', '', true)}${maySee && target !== null ? targetDisplay(target) : ''}${potionStatus(witch)}${note(explanation, self ? 'warning' : '')}
-          <div class="actions">${canHeal ? btn('使用解藥', 'CHOOSE_HEAL') : ''}${btn(canHeal ? '不使用解藥' : '下一步', 'SKIP_HEAL', canHeal ? 'secondary' : 'primary')}</div>${timerHTML()}`);
-      }
-      case 'WITCH_HEAL_CONFIRM':
-        return confirmPage('確定使用解藥救這位玩家？', game.night.wolfTarget, 'CONFIRM_HEAL', '解藥全局只有一瓶，確認後不能撤銷。');
-      case 'WITCH_POISON':
-        return selectionPage('是否使用毒藥？', '可以選擇一名其他存活玩家，或保留毒藥。',
-          `${potionStatus(roleActor(game, 'witch'))}${roleActor(game, 'witch').skills.heal === 0 ? note('解藥已用完，不再提供當晚被刀號碼。') : ''}<div class="actions">${btn('不使用毒藥', 'PASS_POISON', 'secondary')}</div>`);
-      case 'WITCH_POISON_CONFIRM':
-        return confirmPage('確定對這位玩家使用毒藥？', game.selected, 'CONFIRM_POISON', '毒藥全局只有一瓶，確認後不能撤銷。');
-      case 'WITCH_PASS_CONFIRM':
-        return panel(`${ribbon()}${symbol('moon', true)}${heading('今晚不使用毒藥？', '保留毒藥，不選擇毒殺目標。', '', true)}<div class="actions two">${btn('返回', 'BACK', 'secondary')}${btn('確認不使用', 'CONFIRM_PASS')}</div>${timerHTML()}`, 'center');
-      case 'WITCH_DONE': {
-        const text = game.night.witchNote === 'heal' ? '今晚已使用解藥' : game.night.witchNote === 'poison' ? '今晚已使用毒藥' : '藥品已使用完畢';
-        const sub = game.night.witchNote === 'heal' ? '同一晚不能再使用毒藥，剩餘毒藥會保留。' : game.night.witchNote === 'poison' ? '操作已記錄，夜間結束時統一結算。' : '本晚沒有可使用的藥品；按下方按鈕結束操作。';
-        return panel(`${ribbon()}${symbol('check', true)}${heading(text, sub, '', true)}<div class="actions">${btn('完成，結束操作', 'ACK_WITCH')}</div>${timerHTML()}`, 'center');
-      }
+        return playPage(`${ribbon()}<div class="big-player">${game.night.seerTarget}<small>號</small></div><div class="result-emblem">${game.night.seerResult === 'wolf' ? '狼人' : '好人'}</div>`, btn('看完', 'ACK_SEER'), 'center seer-result-panel');
+      case 'WITCH_HEAL': case 'WITCH_POISON': case 'WITCH_DONE': return renderWitch();
       case 'NIGHT_WAIT':
-        return panel(`${ribbon()}${symbol('moon')}<h1 class="title-serif">夜間進行中</h1><p class="muted">請保持閉眼、保持安靜。<br>等待下一段主持詞。</p>${timerHTML()}<p class="tiny muted gap-top no-margin">畫面已遮蔽，無需再操作。</p>`, 'center instruction-page');
-      case 'NIGHT_RESULT': {
-        const ids = game.night.deaths.map(id => game.deathEvents.find(d => d.id === id).playerId);
-        const numbers = ids.map(id => `${id} 號`).join('、');
-        return panel(`<span class="eyebrow">第 ${game.round} 天 / 昨夜結果</span>${symbol('sun')}<p class="muted">${ids.length ? '昨晚死亡的玩家' : '昨晚是'}</p><h1 class="title-serif">${ids.length ? numbers : '平安夜'}</h1><p class="small muted">${ids.length ? (game.resolution.skipLastWords ? '不公開身份與死因，接著處理可執行的技能，不安排遺言。' : '不公開身份與死因，接著依號碼順序發表遺言。') : '所有玩家平安度過昨夜。'}</p><div class="actions">${btn(ids.length ? (game.resolution.skipLastWords ? '繼續' : '開始遺言') : '進入白天', 'CONTINUE_RESULT')}</div>`, 'center');
-      }
+        return playPage(`${ribbon()}${symbol('moon')}<h1 class="cue-title">請保持閉眼</h1>`, '', 'center cue-panel');
       case 'LAST_WORDS': {
         const list = game.resolution.lastWordsQueue;
-        return panel(`<span class="eyebrow">遺言時間</span><div class="big-player">${list[0]}<small>號玩家</small></div><h1>請發表遺言</h1><p class="muted">發言結束後再繼續，不限時。</p><div class="actions">${btn('遺言結束', 'ACK_WORDS')}</div>${list.length > 1 ? `<p class="last-words-queue">下一位：${list.slice(1).map(id => `${id} 號`).join('、')}</p>` : ''}`, 'center');
+        return playPage(`${publicNoticeHTML()}<div class="play-phase-label">第 ${game.round} 天 · 遺言</div><div class="big-player">${list[0]}<small>號玩家</small></div><h1>請發表遺言</h1>${list.length > 1 ? `<p class="words-next">下一位：${list.slice(1).map(id => `${id} 號`).join('、')}</p>` : ''}`, btn('遺言結束', 'ACK_WORDS'), 'center words-panel');
       }
-      case 'DEATH_SKILL_DECISION':
-        return panel(`<span class="eyebrow">${currentDeath(game).playerId} 號玩家</span>${symbol('star')}<h1>你要啟動技能嗎？</h1><p class="muted small">請由該玩家本人操作。</p><div class="actions">${btn('啟動技能', 'ACTIVATE_SKILL')}${btn('不啟動', 'PASS_SKILL', 'secondary')}</div>`, 'center');
-      case 'DEATH_SKILL_PASS_CONFIRM':
-        return panel(`${symbol('star', true)}${heading('確定不啟動技能？', '確認後將繼續流程，無法回頭啟動。', '', true)}<div class="actions two">${btn('返回', 'BACK', 'secondary')}${btn('確認不啟動', 'CONFIRM_PASS_SKILL')}</div>`, 'center');
-      case 'DEATH_SKILL_SELECT':
-        return selectionPage('請選擇要帶走的玩家', '只能選擇目前仍存活的玩家。');
-      case 'DEATH_SKILL_CONFIRM':
-        return confirmPage('確定要帶走這位玩家？', game.selected, 'CONFIRM_SKILL', '確認後立即生效。');
-      case 'DEATH_SKILL_RESULT':
-        return panel(`${symbol('star', true)}<div class="big-player">${game.resolution.lastSkillTarget}<small>號玩家</small></div><h1>死亡</h1><div class="actions">${btn('繼續', 'CONTINUE_RESULT')}</div>`, 'center');
-      case 'DAY_DISCUSSION': {
-        const alive = game.players.filter(p => p.alive).length;
-        return panel(`<div class="row"><span class="eyebrow">第 ${game.round} 天 / 發言階段</span><span class="badge">存活 ${alive} / ${game.players.length}</span></div>${heading('白天發言', '需要啟動技能或自爆時，請點自己的號碼。')}${discussionGrid()}
-          <p class="tiny muted">號碼不標身份；請只點自己的號碼，不要試探其他玩家。</p>${note('發言結束後才進入投票。進入投票／PK 階段，就不能再自爆或決鬥。')}
-          <div class="actions">${btn('發言結束，進入投票', 'VOTE')}</div>`);
-      }
-      case 'DAY_ACTION_DECISION':
-        return panel(`<span class="eyebrow">${game.dayAction.actorId} 號玩家</span>${symbol('star')}<h1>你要啟動技能嗎？</h1><p class="muted small">請由該號玩家本人操作。<br>下一步仍可返回，最後確認才會生效。</p><div class="actions">${btn('啟動技能', 'START_DAY_ACTION')}${btn('返回發言', 'CANCEL_DAY_ACTION', 'secondary')}</div>`, 'center');
+      case 'DEATH_SKILL_SELECT': return selectionPage('你要啟動技能嗎？', '選擇要帶走的玩家');
+      case 'DAY_DISCUSSION':
+        return playPage(`${publicNoticeHTML()}${playHeading('白天發言')}${discussionGrid()}`, btn('進入投票', 'VOTE'));
       case 'DAY_ACTION_UNAVAILABLE':
-        return panel(`<span class="eyebrow">${game.dayAction.actorId} 號玩家</span>${symbol('star')}<h1>目前沒有可啟動的技能</h1><p class="muted small">這個階段沒有可由你主動使用的能力。</p><div class="actions">${btn('返回發言', 'CANCEL_DAY_ACTION')}</div>`, 'center');
-      case 'KNIGHT_SELECT':
-        return selectionPage('請選擇決鬥對象', `${game.dayAction.actorId} 號發動：不能選自己或已出局玩家。`);
-      case 'KNIGHT_CONFIRM':
-        return confirmPage('確定發動決鬥？', game.selected, 'CONFIRM_DUEL', `${game.dayAction.actorId} 號向此玩家決鬥。確認後立即消耗技能，不能撤銷；決鬥死者沒有遺言。`);
+        return playPage(`<div class="play-phase-label">${game.dayAction.actorId} 號玩家</div>${symbol('star', true)}<h1>目前無可用技能</h1>`, '', 'center cue-panel');
+      case 'KNIGHT_SELECT': return selectionPage('你要啟動技能嗎？', '選擇決鬥對象');
       case 'SELF_DESTRUCT_CONFIRM':
-        return panel(`<span class="eyebrow">${game.dayAction.actorId} 號玩家</span>${symbol('star')}<h1>確定要自爆嗎？</h1>${note('確認後自己立即出局，沒有遺言，本日取消投票。技能及終局依本局家規結算。', 'warning')}<div class="actions two">${btn('返回', 'BACK', 'secondary')}${btn('確認自爆', 'CONFIRM_SELF_DESTRUCT', 'danger')}</div>`, 'center');
-      case 'DAY_ACTION_RESULT': {
-        const a = game.lastDayAction;
-        const explodes = a.kind === 'self_destruct';
-        const description = explodes ? '自爆者沒有遺言，本日取消投票。' :
-          `${a.actorId} 號向 ${a.targetId} 號發動決鬥。決鬥死者沒有遺言。`;
-        const next = explodes ? '接著處理可執行的死亡流程，未終局就進入下一夜。' :
-          a.success ? '本日取消投票，未終局就進入下一夜。' : '未終局則回到白天發言，之後正常投票。';
-        return panel(`<span class="eyebrow">第 ${game.round} 天 / 公開結果</span>${symbol('star', true)}<div class="big-player">${a.victimId}<small>號玩家</small></div><h1>${explodes ? '自爆出局' : '死亡'}</h1><p class="muted">${description}</p>${note(next)}<div class="actions">${btn('繼續', 'CONTINUE_RESULT')}</div>`, 'center');
-      }
-      case 'DAY_VOTE_RESULT':
-        return selectionPage('請選擇本輪最終結果', '投票與 PK 由玩家自行完成，這裡只記錄結果。',
-          `<div class="actions">${btn('沒有人出局', 'SELECT', `secondary no-execution ${game.selected === 0 ? 'selected' : ''}`, `data-id="0" aria-pressed="${game.selected === 0}"`)}</div>`);
-      case 'DAY_VOTE_CONFIRM':
-        return confirmPage('確認本輪投票結果', game.selected, 'CONFIRM_VOTE', game.selected === 0 ? '無人被放逐，接著進入下一夜。' : '這位玩家將被放逐。');
-      case 'DAY_EXECUTION':
-        return panel(`<span class="eyebrow">第 ${game.round} 天 / 投票結果</span><div class="big-player">${game.vote.target}<small>號玩家</small></div><h1>被放逐</h1><div class="actions">${btn(game.resolution.skipLastWords ? '繼續' : '發表遺言', 'CONTINUE_RESULT')}</div>`, 'center');
-      case 'DAY_NO_EXECUTION':
-        return panel(`${symbol('sun')}<span class="eyebrow">第 ${game.round} 天 / 投票結果</span><h1>沒有人出局</h1><p class="muted">本輪無人被放逐。</p><div class="actions">${btn('結束白天', 'CONTINUE_NO_VOTE')}</div>`, 'center');
+        return playPage(`${playHeading('你要啟動技能嗎？', '', game.dayAction.actorId)}<div class="self-destruct-summary"><strong>自爆</strong><span>自己出局，本日取消投票</span></div>`, `${btn('確認自爆', 'CONFIRM_SELF_DESTRUCT', 'danger')}${btn('返回發言', 'CANCEL_DAY_ACTION', 'secondary')}`);
+      case 'DAY_VOTE_RESULT': return selectionPage('本輪投票結果');
       case 'NEXT_NIGHT':
-        return panel(`${symbol('moon')}<span class="eyebrow">第 ${game.round} 天結束</span><h1 class="title-serif">準備第 ${game.round + 1} 夜</h1><p class="muted">請將手機放回桌面中央。<br>按下按鈕後，全體閉眼。</p><div class="actions">${btn('天黑，開始下一夜', 'NEXT_NIGHT')}</div>`, 'center');
+        return playPage(`${publicNoticeHTML()}${symbol('moon')}<div class="play-phase-label">第 ${game.round} 天結束</div><h1 class="cue-title">準備第 ${game.round + 1} 夜</h1>`, btn('天黑', 'NEXT_NIGHT'), 'center cue-panel');
       case 'GAME_OVER': {
         const good = game.winner.camp === 'good';
         const reason = { wolves_eliminated: '所有狼人已死亡', villagers_eliminated: '所有村民已死亡', gods_eliminated: '所有神職已死亡' }[game.winner.reason];
-        return panel(`<span class="eyebrow">本局結束</span>${symbol(good ? 'sun' : 'moon')}<h1 class="title-serif">${good ? '好人陣營' : '狼人陣營'}獲勝</h1><p class="muted">${reason}</p>${endingText(game) ? `<div class="ending-summary">${esc(endingText(game))}<small>已完成本次死亡與所有需保留的合法反擊。遊戲結束，不再補遺言。</small></div>` : ''}<div class="victory-stats"><div><strong>${game.round}</strong><span>回合</span></div><div><strong>${game.config.playerCount}</strong><span>位玩家</span></div></div><div class="actions">${btn('查看完整身份', 'SHOW_ROLES')}${btn('查看本局紀錄', 'SHOW_HISTORY', 'secondary')}${btn('再玩一局', 'NEW_GAME', 'soft')}</div>`, 'center');
+        return panel(`<span class="eyebrow">本局結束</span>${symbol(good ? 'sun' : 'moon')}<h1 class="title-serif">${good ? '好人陣營' : '狼人陣營'}獲勝</h1><p class="muted">${reason}</p>${endingText(game) ? `<div class="ending-summary">${esc(endingText(game))}</div>` : ''}<div class="victory-stats"><div><strong>${game.round}</strong><span>回合</span></div><div><strong>${game.config.playerCount}</strong><span>位玩家</span></div></div><div class="actions">${btn('查看完整身份', 'SHOW_ROLES')}${btn('查看本局紀錄', 'SHOW_HISTORY', 'secondary')}${btn('再玩一局', 'NEW_GAME', 'soft')}</div>`, 'center');
       }
       case 'GAME_ROLES':
         return panel(`${heading('本局完整身份', '遊戲已結束，所有身份現在公開。', '覆盤 / 身份')}
@@ -1536,11 +1724,20 @@
     const nightTheme = view === 'game' && (paused || isNight(game) || game.status === 'reveal' || (game.phase === 'GAME_OVER' && game.winner.camp === 'wolf'));
     document.body.dataset.theme = nightTheme ? 'night' : 'day';
     document.getElementById('theme-color').setAttribute('content', nightTheme ? '#101d1c' : '#f4f1e8');
+    document.body.dataset.mode = view === 'game' && active && !paused && !foreignUpdate && game.status === 'playing' ? 'play' : 'standard';
+    const focusAction = document.activeElement?.dataset?.action;
+    const focusId = document.activeElement?.dataset?.id;
+    const focusChoice = document.activeElement?.dataset?.choice;
     app.innerHTML = html;
+    // 同頁換選擇保留鍵盤焦點，不自動聚焦「提交」造成誤操作。
+    if (document.body.dataset.mode === 'play' && ['UI_SELECT', 'UI_ALTERNATIVE', 'UI_WITCH_CHOICE'].includes(focusAction)) {
+      const candidate = [...app.querySelectorAll('button[data-action]')].find(b => b.dataset.action === focusAction && b.dataset.id === focusId && b.dataset.choice === focusChoice);
+      candidate?.focus({ preventScroll: true });
+    }
     // 私密內容不使用 aria-live，以免輔助朗讀器自動念出身份。
     if (view === 'game' && active && !paused && !foreignUpdate && game.status !== 'finished') {
       toolbar.innerHTML = `<button type="button" class="icon-button" data-action="REPLAY" aria-label="重播公開主持詞" title="重播公開主持詞" ${!safeReplayPrompt() ? 'disabled' : ''}>${icons.audio}<span class="toolbar-label">重播</span></button><button type="button" class="icon-button" data-action="PAUSE" aria-label="暫停並遮蔽畫面" title="暫停">${icons.pause}</button>`;
-    } else toolbar.innerHTML = '<span class="version-pill">V1.3</span>';
+    } else toolbar.innerHTML = '<span class="version-pill">V1.4</span>';
     renderNotice(); renderFooter(); updateVoiceOptions(); updateTimerDOM();
   }
 
@@ -1548,9 +1745,11 @@
   function dispatch(action) {
     if (!game || !active || paused || foreignUpdate) return;
     try {
-      const next = transition(game, action);
+      const next = interfaceTransition(game, action);
       const phaseChanged = next.phase !== game.phase;
+      const sameSurface = ['WITCH_HEAL', 'WITCH_POISON'].includes(game.phase) && ['WITCH_HEAL', 'WITCH_POISON'].includes(next.phase);
       if (phaseChanged) {
+        clearTimeout(returnTimer); returnTimer = null;
         flowToken += 1; voice.cancel(); autoKey = null;
         stopClock();
         if (!(isSlotPhase(game) && isSlotPhase(next))) clock = null;
@@ -1558,7 +1757,7 @@
       game = next;
       saveGame();
       render();
-      if (phaseChanged) {
+      if (phaseChanged && !sameSurface) {
         window.scrollTo(0, 0);
         if (game.status !== 'reveal' && !isSlotPhase(game)) app.focus({ preventScroll: true });
       }
@@ -1589,7 +1788,8 @@
     const found = readEnvelope();
     if (!found) { savedEnvelope = null; render(); toast('沒有可恢復的遊戲存檔。'); return; }
     clearFlow();
-    savedEnvelope = found; game = clone(found.game); clock = cleanSavedClock(found.clock);
+    savedEnvelope = found; game = compactState(found.game);
+    clock = found.clock?.kind === 'slot' ? cleanSavedClock(found.clock) : null;
     active = true; view = 'game'; foreignUpdate = false;
     pauseReason = 'resume';
     paused = game.status !== 'finished'; autoKey = null; lastAnnounced = '';
@@ -1607,6 +1807,7 @@
   }
 
   const ENGINE_ACTIONS = new Set([
+    'AUTO', 'UI_COMMIT', 'UI_ALTERNATIVE',
     'REVEAL', 'REMEMBER', 'START', 'REVIEW', 'BACK', 'CONFIRM_GUARD', 'CONFIRM_WOLF', 'CONFIRM_SEER',
     'ACK_SEER', 'PASS_SEER', 'CONFIRM_PASS_SEER', 'CHOOSE_HEAL', 'CONFIRM_HEAL', 'SKIP_HEAL', 'PASS_POISON',
     'CONFIRM_PASS', 'CONFIRM_POISON', 'ACK_WITCH', 'CONTINUE_RESULT', 'ACK_WORDS',
@@ -1620,14 +1821,15 @@
     const button = event.target.closest('button[data-action]');
     if (!button || button.disabled || actionBusy) return;
     const action = button.dataset.action;
-    const clickKey = `${action}:${button.dataset.id || ''}:${button.dataset.role || ''}:${button.dataset.delta || ''}`;
+    const clickKey = `${action}:${button.dataset.id || ''}:${button.dataset.role || ''}:${button.dataset.delta || ''}:${button.dataset.choice || ''}`;
     if (clickKey === lastClickKey && performance.now() - lastClickAt < 220) return;
     lastClickKey = clickKey; lastClickAt = performance.now();
     actionBusy = true;
     try {
       if (ENGINE_ACTIONS.has(action)) { dispatch({ type: action }); return; }
       switch (action) {
-        case 'SELECT': case 'OPEN_DAY_ACTION': dispatch({ type: action, id: Number(button.dataset.id) }); break;
+        case 'UI_SELECT': case 'SELECT': case 'OPEN_DAY_ACTION': dispatch({ type: action, id: Number(button.dataset.id) }); break;
+        case 'UI_WITCH_CHOICE': dispatch({ type: action, choice: button.dataset.choice }); break;
         case 'NEW_GAME': beginSetup(); break;
         case 'HOME':
           view = 'home'; savedEnvelope = readEnvelope(); render(); break;

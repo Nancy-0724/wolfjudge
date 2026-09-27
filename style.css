@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.3.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.4.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -379,3 +379,136 @@ body[data-theme="night"] .role-icon[data-role-icon="evilknight"] { color: #d2b5e
 @media (max-width: 420px) {
   .identity-card h1 { font-size: clamp(29px, 8.5vw, 39px); }
 }
+
+
+/* V1.4 桌面共用手機的精簡操作。僅套用遊戲進行中，身份交接卡完整保留。 */
+body[data-mode="play"] .app-shell {
+  padding: max(10px, env(safe-area-inset-top)) 16px max(118px, calc(env(safe-area-inset-bottom) + 108px));
+}
+body[data-mode="play"] .topbar { min-height: 48px; margin-bottom: 12px; padding: 3px 0; }
+body[data-mode="play"] .brand { font-size: 15px; }
+body[data-mode="play"] .brand small { display: none; }
+body[data-mode="play"] .brand-mark { width: 33px; height: 33px; }
+body[data-mode="play"] .app-footer { display: none; }
+body[data-mode="play"] .page { animation: none; }
+body[data-mode="play"] .icon-button { min-width: 44px; min-height: 44px; }
+.play-panel { padding: 22px; border-radius: 22px; }
+.play-ribbon { margin-bottom: 10px; font-size: 17px; letter-spacing: 0; min-height: 28px; }
+.play-ribbon .phase-role { gap: 6px; }
+.play-ribbon .timer-number { font-size: 18px; font-weight: 650; white-space: nowrap; }
+.play-timer-track { height: 3px; margin: 0 0 20px; }
+.play-phase-label { font-size: 17px; font-weight: 600; color: var(--muted); margin-bottom: 15px; }
+.play-heading { margin-bottom: 16px; }
+.play-heading h1, .words-panel h1 { font-size: clamp(25px, 6.9vw, 33px); line-height: 1.35; margin-bottom: 0; letter-spacing: .015em; }
+.play-heading p { font-size: 17px; color: var(--muted); margin: 9px 0 0; }
+.play-grid { gap: 10px; margin: 16px 0; }
+.play-grid .player-button { min-height: 78px; padding: 9px 3px; border-width: 2px; border-radius: 14px; }
+.play-grid .player-button .number { font-family: var(--font); font-size: 33px; font-weight: 650; line-height: 1; }
+.play-grid .player-button.selected { box-shadow: none; }
+.play-grid .player-button.selected::after { font-size: 15px; right: 6px; top: 2px; }
+.play-grid .player-button:disabled { opacity: .28; }
+.play-grid .player-button.dead .number { text-decoration: line-through; }
+.dead-mark { position: absolute; top: 0; right: 6px; font-size: 17px; }
+.play-panel .btn { font-size: 18px; }
+.choice-option { width: 100%; margin-top: 2px; min-height: 52px; }
+.choice-option.selected { border: 2px solid var(--accent); color: var(--ink); background: var(--gold-soft); }
+.choice-option.selected::before { content: "✓"; font-size: 20px; }
+.action-dock {
+  position: fixed; z-index: 30; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: min(100%, 780px); display: flex; flex-direction: column; gap: 9px;
+  padding: 13px 16px max(15px, env(safe-area-inset-bottom));
+  background: var(--bg); border-top: 1px solid var(--line);
+}
+.action-dock .btn { min-height: 64px; font-size: 21px; width: 100%; padding: 13px 12px; }
+.action-dock .btn.secondary { min-height: 48px; font-size: 18px; }
+/* 兩個底部按鈕的頁面保留足夠捲動空間，不覆蓋最後一排號碼。 */
+body[data-mode="play"]:has(.action-dock .btn + .btn) .app-shell { padding-bottom: max(178px, calc(env(safe-area-inset-bottom) + 164px)); }
+.public-result-strip { padding: 13px 15px; border-radius: 12px; background: var(--surface-2); border: 1px solid var(--line); font-size: 18px; font-weight: 600; margin: 0 0 19px; line-height: 1.6; text-align: left; }
+.cue-panel { min-height: min(440px, 62dvh); display: flex; align-items: center; flex-direction: column; justify-content: center; }
+.cue-panel .public-result-strip { align-self: stretch; }
+.cue-title { font-size: clamp(29px, 8vw, 42px); line-height: 1.4; margin: 12px 0; }
+.cue-hint { font-size: 17px; color: var(--muted); margin-top: 20px; }
+.cue-panel .phase-symbol { width: 64px; height: 64px; margin: 14px auto 22px; }
+.cue-panel .play-ribbon, .cue-panel .play-timer-track { width: 100%; }
+.words-panel .big-player { font-family: var(--font); font-weight: 650; font-size: 92px; margin: 28px 0 18px; }
+.words-next { font-size: 17px; color: var(--muted); margin: 24px 0 0; }
+.seer-result-panel .big-player { font-size: 92px; margin: 32px 0 20px; }
+.seer-result-panel .result-emblem { font-size: 58px; margin-bottom: 38px; }
+.self-destruct-summary { border: 2px solid var(--danger); background: var(--danger-soft); color: var(--danger); padding: 28px 18px; border-radius: 16px; margin-top: 25px; text-align: center; }
+.self-destruct-summary strong { display: block; font-size: 36px; }
+.self-destruct-summary span { display: block; font-size: 18px; margin-top: 12px; }
+/* 固定上綠色十字解藥／下紫色骷髏毒藥；缺藥也不交換兩瓶藥位置。 */
+.potion-actions { display: grid; grid-template-columns: 1fr; gap: 14px; margin: 16px 0; }
+.potion-action {
+  display: flex; align-items: center; text-align: left; gap: 15px;
+  border: 2px solid var(--potion-color); border-left-width: 7px; border-radius: 16px;
+  background: var(--potion-bg); color: var(--potion-color); padding: 12px 14px;
+  min-height: 92px; width: 100%; position: relative;
+}
+.potion-action.heal { --potion-color: #23694f; --potion-bg: #ecf7f0; }
+.potion-action.poison { --potion-color: #714492; --potion-bg: #f3eef9; }
+body[data-theme="night"] .potion-action.heal { --potion-color: #9fdfba; --potion-bg: #18382d; }
+body[data-theme="night"] .potion-action.poison { --potion-color: #d7b5f6; --potion-bg: #31283e; }
+.potion-action .potion-art { flex-shrink: 0; width: 48px; height: 57px; display: inline-flex; }
+.potion-action svg { width: 100%; height: 100%; }
+.potion-action .potion-label { flex: 1; min-width: 0; }
+.potion-label strong { display: block; font-size: 24px; font-weight: 750; letter-spacing: .01em; line-height: 1.25; }
+.potion-label > span { display: block; font-size: 18px; line-height: 1.4; margin-top: 6px; }
+.potion-check { width: 19px; flex: 0 0 19px; font-size: 24px; font-weight: 800; }
+.potion-action.chosen { outline: 2px solid var(--potion-color); outline-offset: 3px; }
+.potion-action:disabled { opacity: .5; border-style: dashed; cursor: not-allowed; }
+.potion-action:disabled .potion-label > span { font-weight: 650; }
+.poison-targets { margin: 18px 0 12px; padding-top: 12px; border-top: 2px solid #8e6ea5; }
+.poison-targets h2 { display: flex; align-items: center; gap: 9px; font-size: 20px; color: #714492; margin: 0 0 8px; }
+body[data-theme="night"] .poison-targets h2 { color: #d7b5f6; }
+.poison-targets h2 svg { width: 29px; height: 29px; }
+.poison-targets .play-grid { margin-top: 8px; margin-bottom: 10px; }
+.poison-targets .player-button.selected { background: #714492; border-color: #714492; color: #fff; }
+body[data-theme="night"] .poison-targets .player-button.selected { background: #d7b5f6; border-color: #d7b5f6; color: #261b31; }
+.btn.commit-heal { background: #276c50; color: #fff; border-color: #276c50; }
+.btn.commit-poison { background: #754594; color: #fff; border-color: #754594; }
+body[data-theme="night"] .btn.commit-heal { background: #9fdfba; color: #173528; border-color: #9fdfba; }
+body[data-theme="night"] .btn.commit-poison { background: #d7b5f6; color: #302039; border-color: #d7b5f6; }
+/* 逾時不再插入會推動版面的提示卡；數字、邊框與固定小提示共用。 */
+body[data-mode="play"] .overtime-warning { position: fixed; top: max(62px, calc(env(safe-area-inset-top) + 56px)); left: 50%; transform: translateX(-50%); padding: 8px 14px; margin: 0; z-index: 45; pointer-events: none; max-width: calc(100vw - 32px); white-space: nowrap; box-shadow: 0 3px 18px #0002; }
+body[data-mode="play"] .overtime-warning .overtime-mark { display: none; }
+body[data-mode="play"] .overtime-warning strong { font-size: 16px; }
+body[data-mode="play"].slot-overdue::after { z-index: 42; border-width: 3px; box-shadow: inset 0 0 17px 2px #a64a4133; }
+body[data-mode="play"].slot-overdue .timer-fill { background: var(--danger); }
+@media (min-width: 680px) {
+  .play-panel { padding: 27px 32px; }
+  .play-grid .player-button { min-height: 90px; }
+  .play-grid .player-button .number { font-size: 39px; }
+  .action-dock { padding-left: 32px; padding-right: 32px; }
+}
+@media (max-width: 420px) {
+  body[data-mode="play"] .app-shell { padding-left: 12px; padding-right: 12px; }
+  .play-panel { padding: 18px 15px; }
+  .play-grid { gap: 9px; }
+  .play-grid .player-button { min-height: 68px; }
+  .play-grid .player-button .number { font-size: 30px; }
+  .play-ribbon { font-size: 16px; }
+  .play-ribbon .role-icon { width: 23px; height: 23px; }
+  .play-timer-track { margin-bottom: 16px; }
+  .potion-action { gap: 12px; padding: 10px 12px; min-height: 84px; }
+  .potion-action .potion-art { width: 42px; height: 49px; }
+  .potion-label strong { font-size: 23px; }
+  .potion-label > span { font-size: 17px; }
+  .witch-panel .play-heading h1 { font-size: 25px; }
+}
+@media (max-width: 350px) {
+  body[data-mode="play"] .app-shell { padding-left: 9px; padding-right: 9px; }
+  .play-panel { padding: 17px 12px; }
+  .play-grid { gap: 7px; }
+  .play-grid .player-button { min-height: 59px; }
+  .play-grid .player-button .number { font-size: 27px; }
+  .potion-action .potion-art { width: 36px; }
+  .potion-label strong { font-size: 21px; }
+  .action-dock .btn { font-size: 19px; }
+  .play-ribbon .timer-number { font-size: 16px; }
+}
+@media (max-height: 700px) and (min-width: 351px) {
+  .play-grid .player-button { min-height: 61px; }
+  .potion-action { min-height: 77px; padding-top: 8px; padding-bottom: 8px; }
+}
+@media (prefers-reduced-motion: reduce) { body[data-mode="play"].slot-overdue::after { animation: none !important; } }
