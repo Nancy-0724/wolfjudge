@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.2.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.3.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -369,4 +369,13 @@ body[data-theme="night"] .role-icon[data-role-icon="wolfking"] { color: #eeb0a1;
   .role-controls { gap: 6px; }
   .role-seal { width: 40px; height: 44px; }
   .role-info strong { font-size: 14px; }
+}
+
+/* V1.3：九種角色；惡靈圖示只用於公開配置、私人身份、終局身份。 */
+.summary-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.role-icon[data-role-icon="evilknight"] { color: #725b89; }
+body[data-theme="night"] .role-icon[data-role-icon="evilknight"] { color: #d2b5eb; }
+.role-row .toggle { flex-shrink: 0; }
+@media (max-width: 420px) {
+  .identity-card h1 { font-size: clamp(29px, 8.5vw, 39px); }
 }
