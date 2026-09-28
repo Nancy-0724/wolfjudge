@@ -1,5 +1,5 @@
 /*
- * 狼人殺自動法官 V1.6.0
+ * 狼人殺自動法官 V1.7.0
  * 無外部函式庫、後端或網路請求；使用 GitHub Pages 即可。
  *
  * 區段：①角色與純規則 ②狀態轉換 ③儲存/語音/計時 ④畫面 ⑤事件。
@@ -14,18 +14,26 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.6.0';
+  const VERSION = '1.7.0';
   // 只在夜間角色閉眼指令完成後緩衝；不延遲睜眼後的操作。
   const NIGHT_BUFFER_MS = 3000;
-  const SCHEMA = 5;
-  const RULESET = 'v1.6-mandatory-charm-last-wolf-exception-hunter-laststand';
+  const SCHEMA = 6;
+  const RULESET = 'v1.7-mixedblood-fixed-villager-hidden-model-victory';
+  const V16_RULESET = 'v1.6-mandatory-charm-last-wolf-exception-hunter-laststand';
   const LEGACY_RULESET = 'v1.3-five-min-evil-once-poison-first-day-retaliation';
   const MIN_PLAYERS = 5;
   const MAX_PLAYERS = 18;
-  const ROLE_ORDER = ['wolf', 'wolfking', 'evilknight', 'wolfbeauty', 'villager', 'seer', 'witch', 'hunter', 'guard', 'knight'];
+  const ROLE_ORDER = ['wolf', 'wolfking', 'evilknight', 'wolfbeauty', 'villager', 'mixedblood', 'seer', 'witch', 'hunter', 'guard', 'knight'];
 
   // 擴充入口一：角色定義。新增角色亦須新增其規則、互動頁面與測試。
   const ROLES = Object.freeze({
+    mixedblood: {
+      // camp 用於查驗／決鬥／魅惑，永遠不因榜樣改變。個人勝負另存 modelBond。
+      name: '混血兒', seal: '混', camp: 'good', category: 'villager', max: 1,
+      summary: '首夜選榜樣，固定計平民',
+      description: '第一夜必須選一名其他玩家為榜樣，確認後不能更換。你不會得知他的身份或陣營，也不會取得技能。查驗、決鬥與魅惑都按平民處理。固定計入平民邊，自己的勝負跟隨榜樣原本陣營，與彼此是否存活無關。',
+      deathSkill: null, selfDestruct: false, followsModel: true
+    },
     wolf: {
       name: '普通狼人', seal: '狼', camp: 'wolf', category: 'wolf', max: MAX_PLAYERS,
       summary: '每晚共同襲擊一人',
@@ -106,6 +114,9 @@
 
   // 擴充入口二：只安排本局有配置的夜間角色。已配置但死亡者仍保留時段。
   const NIGHT_STEPS = Object.freeze([
+    { role: 'mixedblood', label: '混血兒', firstNightOnly: true,
+      wake: 'MIXED_WAKE', sleep: 'MIXED_SLEEP', select: 'MIXED_SELECT',
+      openText: '混血兒請睜眼。請選擇一名其他玩家作為榜樣。', closeText: '混血兒請閉眼。' },
     { role: 'guard', label: '守衛', wake: 'GUARD_WAKE', sleep: 'GUARD_SLEEP', select: 'GUARD_SELECT',
       openText: '守衛請睜眼。請選擇今晚要守護的玩家，或選擇不守護。', closeText: '守衛請閉眼。' },
     { role: 'wolf', label: '狼人', wake: 'WOLF_WAKE', sleep: 'WOLF_SLEEP', select: 'WOLF_SELECT',
@@ -133,14 +144,15 @@
 
   const AUTO_PHASES = new Set([
     'NIGHT_START', 'GUARD_WAKE', 'GUARD_SLEEP', 'WOLF_WAKE', 'WOLF_SLEEP', 'SEER_WAKE', 'SEER_SLEEP',
-    'WITCH_WAKE', 'WITCH_SLEEP', 'BEAUTY_WAKE', 'BEAUTY_SLEEP', 'NIGHT_RESOLVE', 'DAWN'
+    'WITCH_WAKE', 'WITCH_SLEEP', 'BEAUTY_WAKE', 'BEAUTY_SLEEP', 'MIXED_WAKE', 'MIXED_SLEEP', 'NIGHT_RESOLVE', 'DAWN'
   ]);
   const SELECT_PHASES = new Set([
+    'MIXED_SELECT',
     'GUARD_SELECT', 'WOLF_SELECT', 'BEAUTY_SELECT', 'SEER_SELECT', 'WITCH_POISON', 'DEATH_SKILL_SELECT', 'DAY_VOTE_RESULT', 'KNIGHT_SELECT'
   ]);
   const PHASES = new Set([
     'ROLE_HANDOFF', 'ROLE_REVEAL', 'ROLE_COMPLETE', ...AUTO_PHASES,
-    ...SELECT_PHASES, 'GUARD_CONFIRM', 'WOLF_CONFIRM', 'BEAUTY_CONFIRM', 'SEER_CONFIRM', 'SEER_RESULT', 'SEER_PASS_CONFIRM',
+    ...SELECT_PHASES, 'MIXED_CONFIRM', 'GUARD_CONFIRM', 'WOLF_CONFIRM', 'BEAUTY_CONFIRM', 'SEER_CONFIRM', 'SEER_RESULT', 'SEER_PASS_CONFIRM',
     'WITCH_HEAL', 'WITCH_HEAL_CONFIRM', 'WITCH_POISON_CONFIRM', 'WITCH_PASS_CONFIRM',
     'WITCH_DONE', 'NIGHT_WAIT', 'NIGHT_RESULT', 'LAST_WORDS',
     'DEATH_SKILL_DECISION', 'DEATH_SKILL_PASS_CONFIRM', 'DEATH_SKILL_CONFIRM',
@@ -158,9 +170,12 @@
     return game.players.find(p => p.role === role && game.night.aliveAtStart.includes(p.id)) || null;
   }
   function configuredNightSteps(game) {
-    return NIGHT_STEPS.filter(step => step.role === 'wolf'
-      ? ROLE_ORDER.some(role => ROLES[role].camp === 'wolf' && game.config.roles[role] > 0)
-      : (game.config.roles[step.role] || 0) > 0);
+    // round=0 用於開局預覽；首夜角色不能因「已選定」或生死改變本夜排序。
+    const round = game.round || 1;
+    return NIGHT_STEPS.filter(step => (!step.firstNightOnly || round === 1) &&
+      (step.role === 'wolf'
+        ? ROLE_ORDER.some(role => ROLES[role].camp === 'wolf' && game.config.roles[role] > 0)
+        : (game.config.roles[step.role] || 0) > 0));
   }
   function nightBufferKey(game) {
     return `buffer:${game.round}:${game.phase}`;
@@ -186,7 +201,7 @@
   function isNight(game) {
     return !!game && game.status === 'playing' &&
       (game.phase === 'NIGHT_START' || game.phase === 'NIGHT_RESOLVE' ||
-        game.phase === 'NIGHT_WAIT' || /^(GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase));
+        game.phase === 'NIGHT_WAIT' || /^(MIXED|GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase));
   }
   function isSlotPhase(game) {
     return isNight(game) && !AUTO_PHASES.has(game.phase);
@@ -212,7 +227,9 @@
     }
     if (total !== config.playerCount) errors.push(`已配置 ${total} 位，須與 ${config.playerCount} 位玩家一致。`);
     if (!ROLE_ORDER.some(role => ROLES[role].camp === 'wolf' && config.roles?.[role] > 0)) errors.push('狼人陣營至少一名：可使用普通狼人、狼王、惡靈騎士或狼美人。');
-    if (!(config.roles?.villager >= 1)) errors.push('至少需要一名村民。');
+    if (!ROLE_ORDER.some(role => ROLES[role].category === 'villager' && config.roles?.[role] > 0)) {
+      errors.push('平民邊至少一名：普通村民或混血兒。');
+    }
     if (!ROLE_ORDER.some(role => ROLES[role].category === 'god' && config.roles?.[role] > 0)) {
       errors.push('屠邊局至少需要一名神職。');
     }
@@ -222,11 +239,11 @@
 
   function recommendedRoles(count) {
     // 五人只是可調整的起始配置，不強制使用惡靈騎士，也不改屠邊。
-    if (count === 5) return { wolf: 1, wolfking: 0, evilknight: 0, wolfbeauty: 0, villager: 2,
+    if (count === 5) return { wolf: 1, wolfking: 0, evilknight: 0, wolfbeauty: 0, mixedblood: 0, villager: 2,
       seer: 1, witch: 0, hunter: 0, guard: 1, knight: 0 };
     const wolf = count <= 8 ? 2 : count <= 11 ? 3 : count <= 14 ? 4 : 5;
     const hunter = count >= 7 ? 1 : 0;
-    return { wolf, wolfking: 0, evilknight: 0, wolfbeauty: 0, villager: count - wolf - 2 - hunter, seer: 1, witch: 1, hunter, guard: 0, knight: 0 };
+    return { wolf, wolfking: 0, evilknight: 0, wolfbeauty: 0, mixedblood: 0, villager: count - wolf - 2 - hunter, seer: 1, witch: 1, hunter, guard: 0, knight: 0 };
   }
 
   function randomInt(max) {
@@ -265,7 +282,7 @@
           lastCharmTarget: null, lastCharmRound: 0 }
       })),
       night: null, vote: null, resolution: null, deathEvents: [], history: [], winner: null, ending: null,
-      dayAction: null, lastDayAction: null, charm: null, charmVictory: null
+      dayAction: null, lastDayAction: null, charm: null, charmVictory: null, modelBond: null
     };
   }
 
@@ -369,6 +386,10 @@
     assert(game.night && !game.night.resolved, '這一夜已完成結算。');
     assert(Object.values(game.night.completed).every(Boolean), '夜間仍有操作尚未完成。');
     const n = game.night;
+    const mixed = game.players.find(p => p.role === 'mixedblood');
+    assert(!mixed || (game.modelBond?.sourcePlayerId === mixed.id &&
+      game.modelBond.round === 1 && playerById(game, game.modelBond.targetPlayerId)),
+      '混血兒尚未選定榜樣，不能跳過。');
     const beauty = roleActor(game, 'wolfbeauty');
     assert(!beauty || (integer(n.charmTarget) && game.charm?.round === game.round &&
       game.charm.sourcePlayerId === beauty.id && game.charm.targetPlayerId === n.charmTarget),
@@ -423,6 +444,21 @@
     deaths.forEach(death => resolveCharm(game, death)); // 夜間死因不連動；封存已死亡來源。
     game.resolution = makeResolution(game, deaths, 'night');
     log(game, 'night_result', { deaths: deaths.map(d => d.playerId) });
+  }
+
+  /** 個人勝負獨立於 camp / category：不可用這個結果計狼刀、查驗或屠邊。
+   * 遊戲尚未正式結束時不產生公開結果，避免中途暴露混血兒歸屬。
+   */
+  function playerOutcomes(game) {
+    if (game.status !== 'finished' || !game.winner) return [];
+    return game.players.map(player => {
+      const follows = ROLES[player.role].followsModel === true;
+      const bond = follows && game.modelBond?.sourcePlayerId === player.id ? game.modelBond : null;
+      const victoryCamp = follows ? bond?.camp || null : player.camp;
+      return { playerId: player.id, role: player.role, category: player.category,
+        alive: player.alive, modelId: bond?.targetPlayerId || null, victoryCamp,
+        won: victoryCamp === null ? null : victoryCamp === game.winner.camp };
+    });
   }
 
   function getWinner(game) {
@@ -506,7 +542,11 @@
 
   function eligibleTargets(game) {
     let ids = game.players.filter(p => p.alive).map(p => p.id);
-    if (/^(GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase)) ids = [...game.night.aliveAtStart];
+    if (/^(MIXED|GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase)) ids = [...game.night.aliveAtStart];
+    if (game.phase.startsWith('MIXED_')) {
+      const actor = roleActor(game, 'mixedblood');
+      ids = actor && game.round === 1 && !game.modelBond ? ids.filter(id => id !== actor.id) : [];
+    }
     if (game.phase.startsWith('BEAUTY_')) {
       const actor = roleActor(game, 'wolfbeauty');
       const last = actor?.skills.lastCharmRound === game.round - 1 ? actor.skills.lastCharmTarget : null;
@@ -630,13 +670,13 @@
         assert(SELECT_PHASES.has(g.phase), '目前不是選擇目標階段。');
         if (['DAY_VOTE_RESULT', 'GUARD_SELECT'].includes(g.phase) && g.selected === 0) { /* 無人出局／空守 */ }
         else requireTarget(g);
-        const targets = { BEAUTY_SELECT: 'BEAUTY_CONFIRM', GUARD_SELECT: 'GUARD_CONFIRM', KNIGHT_SELECT: 'KNIGHT_CONFIRM', WOLF_SELECT: 'WOLF_CONFIRM', SEER_SELECT: 'SEER_CONFIRM',
+        const targets = { MIXED_SELECT: 'MIXED_CONFIRM', BEAUTY_SELECT: 'BEAUTY_CONFIRM', GUARD_SELECT: 'GUARD_CONFIRM', KNIGHT_SELECT: 'KNIGHT_CONFIRM', WOLF_SELECT: 'WOLF_CONFIRM', SEER_SELECT: 'SEER_CONFIRM',
           WITCH_POISON: 'WITCH_POISON_CONFIRM', DEATH_SKILL_SELECT: 'DEATH_SKILL_CONFIRM',
           DAY_VOTE_RESULT: 'DAY_VOTE_CONFIRM' };
         g.phase = targets[g.phase]; break;
       }
       case 'BACK': {
-        const routes = { BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT', KNIGHT_SELECT: 'DAY_ACTION_DECISION',
+        const routes = { MIXED_CONFIRM: 'MIXED_SELECT', BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT', KNIGHT_SELECT: 'DAY_ACTION_DECISION',
           SELF_DESTRUCT_CONFIRM: 'DAY_ACTION_DECISION', WOLF_CONFIRM: 'WOLF_SELECT', SEER_CONFIRM: 'SEER_SELECT',
           SEER_PASS_CONFIRM: 'SEER_SELECT',
           WITCH_HEAL_CONFIRM: 'WITCH_HEAL', WITCH_POISON_CONFIRM: 'WITCH_POISON',
@@ -645,6 +685,20 @@
           DAY_VOTE_CONFIRM: 'DAY_VOTE_RESULT', GAME_ROLES: 'GAME_OVER', GAME_HISTORY: 'GAME_OVER' };
         assert(routes[g.phase], '此操作已確認，不能回到前一個玩家或撤銷。');
         g.phase = routes[g.phase]; break;
+      }
+      case 'CONFIRM_MODEL': {
+        expect(g, 'MIXED_CONFIRM');
+        const actor = roleActor(g, 'mixedblood');
+        assert(actor && g.round === 1 && !g.modelBond && !g.night.completed.mixedblood,
+          '榜樣只能在第一夜選擇一次。');
+        const id = requireTarget(g);
+        const model = playerById(g, id);
+        assert(model && id !== actor.id && model.role !== 'mixedblood', '請選擇其他玩家。');
+        // 固定原始陣營，不改 player.camp，也不複製任何技能。
+        g.modelBond = { sourcePlayerId: actor.id, targetPlayerId: id,
+          camp: ROLES[model.role].camp, round: 1 };
+        log(g, 'model_select', { source: actor.id, target: id });
+        completeRole(g, 'mixedblood'); break;
       }
       case 'CONFIRM_CHARM': {
         expect(g, 'BEAUTY_CONFIRM');
@@ -912,30 +966,60 @@
             playerById(g, p.skills.lastCharmTarget)?.camp === 'good'))) return false;
         counts[p.role] += 1;
       }
+      if (!('modelBond' in g)) return false;
+      const mixed = g.players.find(p => p.role === 'mixedblood');
+      const bond = g.modelBond;
+      if (bond !== null) {
+        const model = playerById(g, bond?.targetPlayerId);
+        if (!mixed || !model || !integer(bond.sourcePlayerId) || !integer(bond.targetPlayerId) ||
+            bond.sourcePlayerId !== mixed.id || model.id === mixed.id || model.role === 'mixedblood' ||
+            bond.round !== 1 || g.round < 1 || !['good', 'wolf'].includes(bond.camp) ||
+            bond.camp !== ROLES[model.role].camp || g.status === 'reveal') return false;
+      }
+      if (mixed && (mixed.skills.heal !== 0 || mixed.skills.poison !== 0 || mixed.skills.deathUsed ||
+          mixed.skills.duelUsed || mixed.skills.reflectUsed)) return false;
+      if (g.night) {
+        if (typeof g.night.completed.mixedblood !== 'boolean') return false;
+        if (mixed && !bond) {
+          if (g.round !== 1 || !['NIGHT_START', 'MIXED_WAKE', 'MIXED_SELECT', 'MIXED_CONFIRM'].includes(g.phase) ||
+              g.night.completed.mixedblood || g.status !== 'playing') return false;
+        }
+        if (bond && !g.night.completed.mixedblood) return false;
+        if ((!mixed || g.round > 1) && !g.night.completed.mixedblood) return false;
+      }
+      if (g.phase.startsWith('MIXED_')) {
+        if (!mixed || g.round !== 1 || g.status !== 'playing') return false;
+        if ((g.phase === 'MIXED_SLEEP') !== (bond !== null)) return false;
+      }
       return ROLE_ORDER.every(r => counts[r] === g.config.roles[r]);
     } catch (_) { return false; }
   }
 
-  /** V1.3～V1.5 舊局只能以「未配置狼美人」方式升級；不在進行中加角色。
-   * 不從任意壞檔猜身份、補死亡或變更勝方，驗證失敗就保留原存檔不載入。
+  /** 舊局只補「未配置混血兒」欄位，絕不在進行中新增身份或改變勝方。
+   * V1.3～V1.5 先補狼美人欄位，V1.6 原有魅惑狀態完整保留。
    */
   function migrateGame(input) {
     if (!input || typeof input !== 'object') return null;
     if (input.schema === SCHEMA && input.ruleset === RULESET) return clone(input);
-    if (input.schema !== 4 || input.ruleset !== LEGACY_RULESET || !input.config?.roles ||
-        !Array.isArray(input.players) || input.players.some(p => !p || p.role === 'wolfbeauty') ||
-        (input.config.roles.wolfbeauty ?? 0) !== 0) return null;
+    const preBeauty = input.schema === 4 && input.ruleset === LEGACY_RULESET;
+    const v16 = input.schema === 5 && input.ruleset === V16_RULESET;
+    if ((!preBeauty && !v16) || !input.config?.roles || !Array.isArray(input.players) ||
+        input.players.some(p => !p || !p.skills || p.role === 'mixedblood') ||
+        (input.config.roles.mixedblood ?? 0) !== 0 || input.modelBond != null) return null;
+    if (input.night && (!input.night.completed || typeof input.night.completed !== 'object')) return null;
+    if (preBeauty && (input.players.some(p => p.role === 'wolfbeauty') ||
+        (input.config.roles.wolfbeauty ?? 0) !== 0)) return null;
     const g = clone(input);
-    g.schema = SCHEMA; g.ruleset = RULESET; g.version = VERSION;
-    g.config.roles.wolfbeauty = 0;
-    g.charm = null; g.charmVictory = null;
-    for (const p of g.players) {
-      if (!p.skills) return null;
-      p.skills.lastCharmTarget = null; p.skills.lastCharmRound = 0;
+    if (preBeauty) {
+      g.config.roles.wolfbeauty = 0; g.charm = null; g.charmVictory = null;
+      for (const p of g.players) { p.skills.lastCharmTarget = null; p.skills.lastCharmRound = 0; }
+      if (g.night) { g.night.completed.wolfbeauty = true; g.night.charmTarget = null; }
     }
+    g.schema = SCHEMA; g.ruleset = RULESET; g.version = VERSION;
+    g.config.roles.mixedblood = 0; g.modelBond = null;
     if (g.night) {
       if (!g.night.completed) return null;
-      g.night.completed.wolfbeauty = true; g.night.charmTarget = null;
+      g.night.completed.mixedblood = true;
     }
     return g;
   }
@@ -997,7 +1081,7 @@
         g = transition(g, { type: phase === 'DAY_NO_EXECUTION' ? 'CONTINUE_NO_VOTE' : 'CONTINUE_RESULT' });
         continue;
       }
-      const selection = { BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', WOLF_CONFIRM: 'WOLF_SELECT',
+      const selection = { MIXED_CONFIRM: 'MIXED_SELECT', BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', WOLF_CONFIRM: 'WOLF_SELECT',
         SEER_CONFIRM: 'SEER_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT',
         DAY_VOTE_CONFIRM: 'DAY_VOTE_RESULT', DEATH_SKILL_CONFIRM: 'DEATH_SKILL_SELECT' };
       if (selection[phase]) { g.phase = selection[phase]; continue; }
@@ -1096,7 +1180,7 @@
         } else if (phase === 'SEER_SELECT' && g.ui.alternative === 'pass') {
           steps(['PASS_SEER', 'CONFIRM_PASS_SEER']);
         } else {
-          const confirms = { BEAUTY_SELECT: 'CONFIRM_CHARM', GUARD_SELECT: 'CONFIRM_GUARD', WOLF_SELECT: 'CONFIRM_WOLF',
+          const confirms = { MIXED_SELECT: 'CONFIRM_MODEL', BEAUTY_SELECT: 'CONFIRM_CHARM', GUARD_SELECT: 'CONFIRM_GUARD', WOLF_SELECT: 'CONFIRM_WOLF',
             SEER_SELECT: 'CONFIRM_SEER', KNIGHT_SELECT: 'CONFIRM_DUEL',
             DEATH_SKILL_SELECT: 'CONFIRM_SKILL', DAY_VOTE_RESULT: 'CONFIRM_VOTE' };
           assert(confirms[phase], '本階段無法提交選擇。');
@@ -1125,7 +1209,7 @@
       roleActor, currentDeath, isNight, isSlotPhase, configuredNightSteps, endIfWinner,
       availableDayAction, markDeath, makeResolution, advanceResolution, startNight, ROLE_ORDER, SCHEMA, RULESET,
       MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, CHARM_RULES, maySkipSeer, nightOpenText,
-      resolveCharm, livingCounts, migrateGame, latestDeathPlayers, publicVoteText, publicSkillText,
+      resolveCharm, livingCounts, playerOutcomes, migrateGame, latestDeathPlayers, publicVoteText, publicSkillText,
       interfaceTransition, compactState, pageKey, defaultUI, NIGHT_BUFFER_MS, nightBufferKey, isNightClosing, isNightBuffer };
   }
   if (typeof document === 'undefined') return;
@@ -1179,6 +1263,7 @@
     menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>'
   };
   const ROLE_ART = Object.freeze({
+    mixedblood: '<circle cx="23" cy="19" r="9"/><path d="M5 54v-8c0-10 8-16 18-16 5 0 10 2 13 5M13 49v5"/><circle cx="45" cy="25" r="8"/><path d="M34 43c3-5 7-7 12-7 8 0 13 5 13 13v5H38"/><path d="M23 48h15m-5-5 5 5-5 5"/>',
     wolfbeauty: '<path d="m12 27-3-18 17 11h12L55 9l-3 18 3 9-12 14-11 8-11-8L9 36Z"/><path d="m15 17 4 12 8-5m22-7-4 12-8-5M18 34l8 3m20-3-8 3"/><path d="M32 53c-4-3-11-7-11-11 0-5 7-6 11-1 4-5 11-4 11 1 0 4-7 8-11 11Z"/>',
     evilknight: '<path d="M19 28c-8-7-3-17 3-22 0 8 6 8 8 12 1-6 5-8 7-14 8 7 15 15 11 24"/><path d="M17 30c0-10 30-10 30 0v12l-6 5v10H23V47l-6-5Z"/><path d="m23 34 6 4m12-4-6 4M28 45h8M29 49v8m6-8v8M10 49l7 7m30 0 7-7"/>',
     guard: '<path d="M32 5 54 14v17c0 14-10 23-22 29C20 54 10 45 10 31V14Z"/><path d="M32 12 47 18v13c0 9-6 17-15 22-9-5-15-13-15-22V18Z"/><path d="m22 31 7 7 14-15"/>',
@@ -1214,7 +1299,10 @@
   function totalConfigured() { return Object.values(draft.roles).reduce((sum, value) => sum + value, 0); }
   function stepTrack(n) { return `<div class="step-track" aria-label="設定步驟 ${n} / 3">${[1, 2, 3].map(i => `<span class="${i <= n ? 'active' : ''}"></span>`).join('')}</div>`; }
   // 陣營樣式只用於公開配置與私人身份卡，絕不套用到白天號碼／通用技能介面。
+  const presentationGroup = role => ROLES[role].followsModel ? 'mixed' : ROLES[role].camp;
   const CAMP_PRESENTATION = Object.freeze({
+    mixed: { name: '特殊角色', side: '平民邊・勝負跟隨榜樣', headline: '勝負跟隨榜樣',
+      goal: '固定算平民；跟隨榜樣原本的陣營一起判勝負。' },
     wolf: { name: '狼人陣營', side: '壞人方', headline: '你是壞人',
       goal: '目標：讓村民全滅，或神職全滅。' },
     good: { name: '好人陣營', side: '好人方', headline: '你是好人',
@@ -1222,15 +1310,25 @@
   });
   function campHeader(config, camp) {
     const info = CAMP_PRESENTATION[camp];
-    const roles = ROLE_ORDER.filter(role => ROLES[role].camp === camp);
+    const roles = ROLE_ORDER.filter(role => presentationGroup(role) === camp);
     const total = roles.reduce((sum, role) => sum + config.roles[role], 0);
     const villagers = config.roles.villager;
-    const detail = camp === 'wolf' ? '壞人方' : `村民 ${villagers} 人 · 神職 ${total - villagers} 人`;
+    const detail = camp === 'wolf' ? '真正狼人，參與共同狼刀' : camp === 'mixed'
+      ? '固定算平民，勝負跟榜樣' : `普通村民 ${villagers} 人 · 神職 ${total - villagers} 人`;
     return `<header class="camp-group-header"><div><h2>${info.name}</h2><p>${detail}</p></div><span class="camp-total">${total}<span>人</span></span></header>`;
   }
+  function sideCountsHTML(config) {
+    const wolves = ROLE_ORDER.filter(r => ROLES[r].camp === 'wolf').reduce((n,r) => n + config.roles[r], 0);
+    const civilians = ROLE_ORDER.filter(r => ROLES[r].category === 'villager').reduce((n,r) => n + config.roles[r], 0);
+    const gods = ROLE_ORDER.filter(r => ROLES[r].category === 'god').reduce((n,r) => n + config.roles[r], 0);
+    return `<div class="side-counts" aria-label="屠邊人數"><div><span>狼人</span><strong>${wolves}</strong></div><div><span>平民邊</span><strong>${civilians}</strong></div><div><span>神職邊</span><strong>${gods}</strong></div></div>${config.roles.mixedblood ? '<p class="side-count-note">平民邊包含混血兒；勝負歸屬不公開。</p>' : ''}`;
+  }
+  function mixedRulesNote() {
+    return note('<strong>混血兒：固定算平民</strong><br>首夜必選榜樣，陣營不告知、不繼承技能。<br>查驗、決鬥、魅惑按平民處理；屠民須包含混血兒，個人勝負跟榜樣原本陣營，與存活無關。');
+  }
   function roleSummary(config) {
-    return `<div class="camp-summary">${['wolf', 'good'].map(camp => {
-      const cards = ROLE_ORDER.filter(role => ROLES[role].camp === camp).map(role => {
+    return `<div class="camp-summary">${['wolf', 'good', 'mixed'].map(camp => {
+      const cards = ROLE_ORDER.filter(role => presentationGroup(role) === camp).map(role => {
         const count = config.roles[role];
         const included = count > 0;
         return `<div class="summary-item ${included ? 'is-included' : 'is-excluded'}" data-summary-role="${role}" aria-label="${ROLES[role].name}，${count} 人，${included ? '本局加入' : '未加入'}">
@@ -1243,8 +1341,10 @@
   }
   function rulesHTML() {
     return `<details class="rules-details"><summary>查看本版家規與使用提醒</summary><div class="rules-content">
-      <p><strong>角色配置：</strong>5～18 人；普通狼人、狼王、惡靈騎士、狼美人、村民、預言家、女巫、獵人、守衛、騎士。特殊角色各最多一名；狼人陣營、村民、神職各至少一名。可只有狼王、惡靈騎士或狼美人、沒有普通狼人，不提供板子選擇。五人也用屠邊，不增加首夜免死或限次查驗。</p>
-      <p><strong>夜間：</strong>守衛 → 狼人陣營 → 狼美人 → 預言家 → 女巫。只排有配置的夜間角色。所有狼人陣營共用一刀，仍可選任一存活號碼；刀中惡靈騎士無效。預言家只查陣營，查惡靈顯示狼人；本局若有配置惡靈，預言家每晚也可選不查驗。入夜時存活的角色可以完成當晚操作，即使同晚死亡。</p>
+      <p><strong>角色配置：</strong>5～18 人；普通狼人、狼王、惡靈騎士、狼美人、村民、混血兒、預言家、女巫、獵人、守衛、騎士。特殊角色各最多一名；真正狼人、平民邊、神職邊各至少一名；平民邊含普通村民與混血兒。可只有狼王、惡靈騎士或狼美人、沒有普通狼人，不提供板子選擇。五人也用屠邊，不增加首夜免死或限次查驗。</p>
+      <p><strong>夜間：</strong>首夜混血兒先選榜樣，其後為守衛 → 狼人陣營 → 狼美人 → 預言家 → 女巫。只排有配置的夜間角色。所有狼人陣營共用一刀，仍可選任一存活號碼；刀中惡靈騎士無效。預言家只查陣營，查惡靈顯示狼人；本局若有配置惡靈，預言家每晚也可選不查驗。入夜時存活的角色可以完成當晚操作，即使同晚死亡。</p>
+      <p><strong>混血兒：</strong>每局最多一名，第一夜先選一名其他玩家為榜樣，不能跳過或改選。系統不告知榜樣陣營，亦不通知榜樣本人。只跟隨榜樣原本陣營的勝負，不複製技能、不加入狼人隊友或狼刀、不可自爆。榜樣或本人死亡不改變歸屬、不連動死亡。第二夜起不再安排混血兒時段。</p>
+      <p><strong>混血兒與屠邊：</strong>永遠固定計入平民邊；要屠民，普通村民與混血兒均須出局；屠神則不要求混血兒死亡。查驗一律顯示好人，騎士決鬥他會失敗，狼美人可魅惑他。即使跟狼同勝負也不算真正狼人；真正狼人全滅時仍依既有終局與反擊規則結算，不能由混血兒接手狼刀。最後狼美人魅惑帶走最後平民混血兒，可以觸發既定的魅惑屠邊例外。查驗顯示好人不保證個人勝負同屬好人。</p>
       <p><strong>女巫：</strong>不可自救或自毒；解藥、毒藥各一次，同夜只能用一瓶。<strong>解藥尚在才能看狼刀；用完後連本人被刀也不顯示號碼。</strong>不透露守護目標。</p>
       <p><strong>守衛：</strong>可自守、可空守，不可連續兩晚守同一人；空守一晚後可重守。守護只影響當晚普通狼刀，同晚死亡不取消已確認守護。<strong>同守同救仍死亡</strong>，死者可依資格帶人；毒藥不能擋，含毒死因不能帶人。</p>
       <p><strong>騎士：</strong>整局決鬥一次，限存活且白天發言時使用，不限自己的發言輪。選到狼人陣營，目標死亡、取消投票，未終局就下一夜；選到好人，自己死亡、未終局則回白天。<strong>決鬥死者一律無遺言；被決鬥的狼王不能帶人。</strong></p>
@@ -1261,8 +1361,8 @@
       <p><strong>遺言：</strong>尚未終局的一般夜死、放逐及技能帶人有遺言；騎士決鬥與自爆者沒有。終局前反擊不安排遺言，結束後也不補。多人夜死按號碼順序處理。</p>
       <p><strong>操作時間：</strong>完成可立即結束；逾時只低頻閃紅催促，仍能選擇、返回與確認。已配置但已死亡的夜間角色保留等待時段，時間差仍可能成為推理線索。</p>
       <p><strong>資訊保護：</strong>私密身份、夜間目標與查驗結果不朗讀。切換 App 或暫停會遮蔽。沒有操作碼，網站不能驗證拿手機的人，禁止試點他人號碼；所有玩家仍須遵守閉眼規則。</p>
-      <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版新增狼美人與專屬終局規則。V1.3～V1.5 舊局可按原配置延續，但不能中途加入角色；V1.2 及更早的舊局不相容。</p>
-      <p><strong>V1.6 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
+      <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版新增混血兒，固定算平民、個人勝負跟隨榜樣。V1.3～V1.6 舊局可按原配置延續，但不能中途加入角色；V1.2 及更早的舊局不相容。</p>
+      <p><strong>V1.7 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
     </div></details>`;
   }
 
@@ -1291,7 +1391,7 @@
       const item = JSON.parse(raw);
       const migrated = item ? migrateGame(item.game) : null;
       if (!migrated || !validGame(migrated)) {
-        saveIssue = '存檔無法讀取，或不是相容的 V1.3～V1.6 存檔。請開始新遊戲；確認分配身份後才會覆蓋舊存檔。';
+        saveIssue = '存檔無法讀取，或不是相容的 V1.3～V1.7 存檔。請開始新遊戲；確認分配身份後才會覆蓋舊存檔。';
         return null;
       }
       return { ...item, schema: SCHEMA, game: migrated };
@@ -1665,8 +1765,8 @@
     const stored = savedEnvelope?.game;
     const resume = stored ? `<div class="resume-card"><div class="resume-text"><strong>${stored.status === 'finished' ? '上一局已結束' : '有一局尚未結束'}</strong><p>${stored.round ? `第 ${stored.round} 回合` : '身份分配階段'} · ${stored.config.playerCount} 人</p></div></div>` : '';
     return `<div class="page"><section class="panel home-panel">
-      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.6</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
-      <p class="home-copy">十種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
+      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.7</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
+      <p class="home-copy">十一種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
       ${resume}<div class="actions">${stored ? btn(stored.status === 'finished' ? '查看上一局結果' : '繼續上次遊戲', 'LOAD_GAME') : ''}${btn(`開始新遊戲 ${icons.arrow}`, 'NEW_GAME', stored ? 'secondary' : 'primary')}</div>
       <div class="home-features"><div class="feature"><strong>一機輪流</strong>不用實體身份牌</div><div class="feature"><strong>語音帶局</strong>夜間流程自動推進</div><div class="feature"><strong>自動結算</strong>記錄死亡與勝負</div></div>
     </section>${rulesHTML()}</div>`;
@@ -1687,30 +1787,30 @@
   }
   function renderSetupRoles() {
     const errors = configErrors(draft);
-    const groups = ['wolf', 'good'].map(camp => {
-      const rows = ROLE_ORDER.filter(role => ROLES[role].camp === camp).map(role => {
+    const groups = ['wolf', 'good', 'mixed'].map(camp => {
+      const rows = ROLE_ORDER.filter(role => presentationGroup(role) === camp).map(role => {
         const r = ROLES[role];
         const included = draft.roles[role] > 0;
         const controls = r.max === 1
           ? `<button type="button" class="toggle" role="switch" aria-label="加入${r.name}" aria-checked="${draft.roles[role] === 1}" data-action="TOGGLE_ROLE" data-role="${role}"></button>`
-          : `<div class="role-controls"><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="-1" aria-label="減少${r.name}" ${draft.roles[role] <= (role === 'wolf' ? 0 : 1) ? 'disabled' : ''}>−</button><span class="role-count">${draft.roles[role]}</span><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="1" aria-label="增加${r.name}" ${draft.roles[role] >= draft.playerCount ? 'disabled' : ''}>＋</button></div>`;
+          : `<div class="role-controls"><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="-1" aria-label="減少${r.name}" ${draft.roles[role] <= (0) ? 'disabled' : ''}>−</button><span class="role-count">${draft.roles[role]}</span><button type="button" data-action="ROLE_COUNT" data-role="${role}" data-delta="1" aria-label="增加${r.name}" ${draft.roles[role] >= draft.playerCount ? 'disabled' : ''}>＋</button></div>`;
         return `<div class="role-row ${included ? 'is-included' : 'is-excluded'}" data-config-role="${role}"><span class="role-seal" aria-hidden="true">${roleIcon(role)}</span><div class="role-info"><div class="role-name-line"><strong>${r.name}</strong><span class="row-presence">${included ? '已加入' : '未加入'}</span></div><small>${r.summary}</small></div>${controls}</div>`;
       }).join('');
       return `<section class="camp-group role-config-group camp-${camp}" aria-label="${CAMP_PRESENTATION[camp].name}">${campHeader(draft, camp)}<div class="camp-role-rows">${rows}</div></section>`;
     }).join('');
     return panel(`${stepTrack(2)}${heading('分配角色數量', '先設定牌組；下一步才會隨機發給玩家。', '02 / 角色配置')}
-      <div class="camp-config">${groups}</div><div class="config-count"><span>已配置角色</span><strong>${totalConfigured()} / ${draft.playerCount}</strong></div>
+      ${sideCountsHTML(draft)}<div class="camp-config">${groups}</div><div class="config-count"><span>已配置角色</span><strong>${totalConfigured()} / ${draft.playerCount}</strong></div>
       ${errors.length ? note(errors.map(esc).join('<br>'), 'warning') : note('配置完成。特殊角色各 0 或 1 名；普通狼人可為 0，只要狼人陣營合計至少一名即可。')}
       ${draft.playerCount === 5 ? note('五人仍採屠邊，第一夜起正常行動；本配置未經勝率平衡驗證，反傷可能讓遊戲快速結束。') : ''}
-      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}
+      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}${draft.roles.mixedblood ? mixedRulesNote() : ''}
       <div class="center"><button type="button" class="text-button" data-action="RECOMMEND_ROLES">依人數重新配置</button></div>
       <div class="actions two">${btn('上一步', 'SETUP_COUNT', 'secondary')}${btn('確認設定', 'SETUP_CONFIRM', 'primary', errors.length ? 'disabled' : '')}</div>`);
   }
 
   function renderSetupConfirm() {
     return `<div class="page"><section class="panel">${stepTrack(3)}${heading(`${draft.playerCount} 人局，準備入夜`, '請確認角色與主持設定，再開始秘密發牌。', '03 / 確認設定')}
-      ${roleSummary(draft)}${note('<strong>本版固定家規</strong><br>屠邊勝負 · 女巫不可自救 · 同守同救死亡<br>獵人保有合法反擊 · 狼王自爆可帶人<br>解藥用完不看刀 · 決鬥、自爆者無遺言')}
-      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}
+      ${sideCountsHTML(draft)}${roleSummary(draft)}${note('<strong>本版固定家規</strong><br>屠邊勝負 · 女巫不可自救 · 同守同救死亡<br>獵人保有合法反擊 · 狼王自爆可帶人<br>解藥用完不看刀 · 決鬥、自爆者無遺言')}
+      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}${draft.roles.mixedblood ? mixedRulesNote() : ''}
       <hr class="divider"><h2>主持設定</h2>${audioSettingsHTML(true)}
       ${savedEnvelope?.game.status !== 'finished' && savedEnvelope ? note('按下「分配身份」會覆蓋尚未結束的上一局。', 'warning') : ''}
       <div class="actions two">${btn('修改角色', 'SETUP_ROLES', 'secondary')}${btn('分配身份', 'DEAL')}</div>
@@ -1773,6 +1873,10 @@
     const selected = game.selected;
     const alt = game.ui?.alternative === 'pass';
     switch (game.phase) {
+      case 'MIXED_SELECT':
+        detail = '只選一次，不告知榜樣陣營';
+        label = selected !== null ? `確定選擇 ${selected} 號` : '請選擇榜樣';
+        break;
       case 'GUARD_SELECT': {
         const actor = roleActor(game, 'guard');
         const last = actor.skills.lastGuardRound === game.round - 1 ? actor.skills.lastGuardTarget : null;
@@ -1878,24 +1982,27 @@
       case 'ROLE_REVEAL': {
         const p = game.players[game.revealIndex], r = ROLES[p.role];
         const teammates = game.players.filter(x => x.camp === 'wolf' && x.id !== p.id);
-        const camp = CAMP_PRESENTATION[p.camp];
-        const category = r.category === 'god' ? '神職' : r.category === 'villager' ? '村民' : null;
+        const group = presentationGroup(p.role);
+        const camp = CAMP_PRESENTATION[group];
+        const mixed = r.followsModel === true;
+        const category = mixed ? '屠邊分類：平民' : r.category === 'god' ? '神職' : r.category === 'villager' ? '村民' : null;
         return panel(`<div class="privacy-label">${icons.lock} ${p.id} 號玩家專屬</div>
-          <div class="identity-card camp-${p.camp}">
-            <div class="identity-camp-banner"><strong>${camp.headline}</strong><span>${camp.name}</span></div>
+          <div class="identity-card camp-${group}">
+            <div class="identity-camp-banner"><strong>${camp.headline}</strong><span>${mixed ? '不告知陣營' : camp.name}</span></div>
             ${roleIcon(p.role, 'identity-icon')}<h1>${r.name}</h1>
             ${category ? `<span class="identity-category">${category}</span>` : ''}
-            <p class="identity-goal">${game.config.roles.wolfbeauty && p.camp === 'good' ? '目標：淘汰所有狼人，並避免最後狼美人的魅惑造成屠邊。' : camp.goal}</p>
+            <p class="identity-goal">${!mixed && game.config.roles.wolfbeauty && p.camp === 'good' ? '目標：淘汰所有狼人，並避免最後狼美人的魅惑造成屠邊。' : camp.goal}</p>
             ${p.camp === 'wolf' ? `<div class="teammates"><span>你的狼人隊友</span><br><strong>${teammates.length ? teammates.map(x => `${x.id} 號`).join('、') : '本局沒有其他狼人隊友'}</strong></div>` : ''}
           </div>
           <p class="identity-description">${r.description}</p><div class="actions">${btn('我記住了，隱藏身份', 'REMEMBER')}</div><p class="tiny muted gap-top no-margin">身份不會朗讀，也不能返回上一位。</p>`, 'center private-role-panel');
       }
       case 'ROLE_COMPLETE':
         return panel(`${symbol('check')}${heading('所有身份已確認', '請把手機放到桌面中央。', '準備開始', true)}
-          ${note(`本局夜間順序：<strong>${configuredNightSteps(game).map(s => s.label).join(' → ')}</strong>。<br>每個角色倒數 <strong>${game.config.nightSeconds} 秒</strong> 作為催促；完成即可結束，逾時只閃紅提醒，仍可操作。`)}
+          ${note(`本局夜間順序：<strong>${configuredNightSteps(game).map(s => s.label + (s.firstNightOnly ? '（僅首夜）' : '')).join(' → ')}</strong>。<br>每個角色倒數 <strong>${game.config.nightSeconds} 秒</strong> 作為催促；完成即可結束，逾時只閃紅提醒，仍可操作。`)}
           <div class="actions">${btn(`${icons.audio} 測試主持語音`, 'TEST_VOICE', 'secondary')}${btn(settings.audio ? '啟用語音並開始遊戲' : '以文字模式開始遊戲', 'START')}</div>
           <div class="center"><button type="button" class="text-button" data-action="TOGGLE_AUDIO">${settings.audio ? '改用文字模式' : '改用語音模式'}</button></div>
           <p class="tiny muted no-margin">文字模式需有人讀出畫面指示。請先確認每位玩家聽得見語音。</p>`, 'center');
+      case 'MIXED_SELECT': return selectionPage('選擇你的榜樣');
       case 'GUARD_SELECT': return selectionPage('今晚守護誰？');
       case 'WOLF_SELECT': return selectionPage('今晚襲擊誰？');
       case 'BEAUTY_SELECT': return selectionPage('今晚魅惑誰？');
@@ -1922,17 +2029,34 @@
         return playPage(`${publicNoticeHTML()}${symbol('moon')}<div class="play-phase-label">第 ${game.round} 天結束</div><h1 class="cue-title">準備第 ${game.round + 1} 夜</h1>`, btn('天黑', 'NEXT_NIGHT'), 'center cue-panel');
       case 'GAME_OVER': {
         const good = game.winner.camp === 'good';
-        const reason = { wolves_eliminated: '所有狼人已死亡', villagers_eliminated: '所有村民已死亡', gods_eliminated: '所有神職已死亡', charm_villagers_eliminated: '魅惑新增死亡造成村民全滅（本局終局例外）', charm_gods_eliminated: '魅惑新增死亡造成神職全滅（本局終局例外）' }[game.winner.reason];
-        return panel(`<span class="eyebrow">本局結束</span>${symbol(good ? 'sun' : 'moon')}<h1 class="title-serif">${good ? '好人陣營' : '狼人陣營'}獲勝</h1><p class="muted">${reason}</p>${endingText(game) ? `<div class="ending-summary">${esc(endingText(game))}</div>` : ''}<div class="victory-stats"><div><strong>${game.round}</strong><span>回合</span></div><div><strong>${game.config.playerCount}</strong><span>位玩家</span></div></div><div class="actions">${btn('查看完整身份', 'SHOW_ROLES')}${btn('查看本局紀錄', 'SHOW_HISTORY', 'secondary')}${btn('再玩一局', 'NEW_GAME', 'soft')}</div>`, 'center');
+        const reason = { wolves_eliminated: '所有狼人已死亡', villagers_eliminated: '平民邊已全滅', gods_eliminated: '所有神職已死亡', charm_villagers_eliminated: '魅惑新增死亡造成平民邊全滅（本局終局例外）', charm_gods_eliminated: '魅惑新增死亡造成神職全滅（本局終局例外）' }[game.winner.reason];
+        return panel(`<span class="eyebrow">本局結束</span>${symbol(good ? 'sun' : 'moon')}<h1 class="title-serif">${good ? '好人陣營' : '狼人陣營'}獲勝</h1><p class="muted">${reason}</p>${endingText(game) ? `<div class="ending-summary">${esc(endingText(game))}</div>` : ''}<div class="victory-stats"><div><strong>${game.round}</strong><span>回合</span></div><div><strong>${game.config.playerCount}</strong><span>位玩家</span></div></div>${mixedOutcomeHTML(game)}<div class="actions">${btn('查看完整身份', 'SHOW_ROLES')}${btn('查看本局紀錄', 'SHOW_HISTORY', 'secondary')}${btn('再玩一局', 'NEW_GAME', 'soft')}</div>`, 'center');
       }
       case 'GAME_ROLES':
         return panel(`${heading('本局完整身份', '遊戲已結束，所有身份現在公開。', '覆盤 / 身份')}
-          <div class="identity-list">${game.players.map(p => `<div class="identity-item"><span class="seat">${String(p.id).padStart(2, '0')}</span>${roleIcon(p.role, 'list-icon')}<div><strong>${ROLES[p.role].name}</strong><small>${p.alive ? '存活' : '已出局'} · ${p.camp === 'wolf' ? '狼人陣營' : '好人陣營'}</small></div></div>`).join('')}</div>
+          <div class="identity-list">${game.players.map(p => identityResultHTML(p)).join('')}</div>
           <div class="actions">${btn('查看本局紀錄', 'SHOW_HISTORY', 'secondary')}${btn('返回結果', 'BACK')}</div>`);
       case 'GAME_HISTORY':
         return panel(`${heading('本局完整紀錄', '包含夜間選擇、用藥與死亡技能。', '覆盤 / 流程')}${historyHTML()}<div class="actions">${btn('返回結果', 'BACK')}</div>`);
       default: return panel(heading('畫面無法讀取', '請重新載入並恢復本局。'));
     }
+  }
+  function mixedOutcomeHTML(g) {
+    const result = playerOutcomes(g).find(p => p.role === 'mixedblood');
+    if (!result) return '';
+    return `<section class="mixed-outcome camp-mixed" aria-label="混血兒個人結果">
+      <div class="mixed-outcome-heading">${roleIcon('mixedblood', 'list-icon')}<strong>${result.playerId} 號混血兒</strong><span class="outcome-badge">${result.won ? '獲勝' : '落敗'}</span></div>
+      <p>榜樣：${result.modelId} 號 · 跟隨${result.victoryCamp === 'wolf' ? '狼人' : '好人'}陣營</p>
+      <p>屠邊分類：平民 · ${result.alive ? '存活' : '已出局'}</p>
+    </section>`;
+  }
+  function identityResultHTML(p) {
+    const result = playerOutcomes(game).find(r => r.playerId === p.id);
+    if (!result) return '';
+    const mixed = p.role === 'mixedblood';
+    const line = mixed ? `屠邊：平民 · 榜樣 ${result.modelId} 號` :
+      p.camp === 'wolf' ? '狼人陣營' : '好人陣營';
+    return `<div class="identity-item ${mixed ? 'mixed-result-item camp-mixed' : ''}"><span class="seat">${String(p.id).padStart(2, '0')}</span>${roleIcon(p.role, 'list-icon')}<div><strong>${ROLES[p.role].name}</strong><small>${p.alive ? '存活' : '已出局'} · ${line}</small>${mixed ? `<small>跟隨${result.victoryCamp === 'wolf' ? '狼人' : '好人'}陣營</small>` : ''}<span class="outcome-badge">${result.won ? '獲勝' : '落敗'}</span></div></div>`;
   }
   function endingText(g) {
     const ids = g.ending?.playerIds || [];
@@ -1947,6 +2071,10 @@
   function historyDescription(entry) {
     const target = entry.target;
     switch (entry.type) {
+      case 'model_select': {
+        const result = playerOutcomes(game).find(p => p.playerId === entry.source);
+        return `${entry.source} 號混血兒選擇 ${target} 號為榜樣。${result ? `跟隨${result.victoryCamp === 'wolf' ? '狼人' : '好人'}陣營，本局${result.won ? '獲勝' : '落敗'}。` : ''}`;
+      }
       case 'guard_protect': return entry.target === null ? '守衛本晚不守護。' : `守衛守護 ${entry.target} 號。`;
       case 'knight_duel': return `${entry.source} 號向 ${target} 號決鬥；${entry.victim} 號死亡，無遺言。${entry.success ? '取消本日投票。' : '未終局則繼續白天。'}`;
       case 'self_destruct': return `${entry.source} 號自爆出局；無遺言，本日取消投票。`;
@@ -2007,7 +2135,7 @@
     // 私密內容不使用 aria-live，以免輔助朗讀器自動念出身份。
     if (view === 'game' && active && !paused && !foreignUpdate && game.status !== 'finished') {
       toolbar.innerHTML = `<button type="button" class="icon-button" data-action="REPLAY" aria-label="重播公開主持詞" title="重播公開主持詞" ${!safeReplayPrompt() ? 'disabled' : ''}>${icons.audio}<span class="toolbar-label">重播</span></button><button type="button" class="icon-button" data-action="PAUSE" aria-label="暫停並遮蔽畫面" title="暫停">${icons.pause}</button>`;
-    } else toolbar.innerHTML = '<span class="version-pill">V1.6</span>';
+    } else toolbar.innerHTML = '<span class="version-pill">V1.7</span>';
     renderNotice(); renderFooter(); updateVoiceOptions(); updateTimerDOM();
   }
 
@@ -2079,7 +2207,7 @@
 
   const ENGINE_ACTIONS = new Set([
     'AUTO', 'UI_COMMIT', 'UI_ALTERNATIVE',
-    'REVEAL', 'REMEMBER', 'START', 'REVIEW', 'BACK', 'CONFIRM_GUARD', 'CONFIRM_WOLF', 'CONFIRM_CHARM', 'CONFIRM_SEER',
+    'REVEAL', 'REMEMBER', 'START', 'REVIEW', 'BACK', 'CONFIRM_GUARD', 'CONFIRM_WOLF', 'CONFIRM_MODEL', 'CONFIRM_CHARM', 'CONFIRM_SEER',
     'ACK_SEER', 'PASS_SEER', 'CONFIRM_PASS_SEER', 'CHOOSE_HEAL', 'CONFIRM_HEAL', 'SKIP_HEAL', 'PASS_POISON',
     'CONFIRM_PASS', 'CONFIRM_POISON', 'ACK_WITCH', 'CONTINUE_RESULT', 'ACK_WORDS',
     'ACTIVATE_SKILL', 'PASS_SKILL', 'CONFIRM_PASS_SKILL', 'CONFIRM_SKILL', 'VOTE',
@@ -2125,13 +2253,13 @@
         case 'ROLE_COUNT': {
           const role = button.dataset.role;
           if (['wolf', 'villager'].includes(role)) {
-            draft.roles[role] = Math.max(role === 'wolf' ? 0 : 1, Math.min(draft.playerCount, draft.roles[role] + Number(button.dataset.delta))); render();
+            draft.roles[role] = Math.max(0, Math.min(draft.playerCount, draft.roles[role] + Number(button.dataset.delta))); render();
           }
           break;
         }
         case 'TOGGLE_ROLE': {
           const role = button.dataset.role;
-          if (['seer', 'witch', 'hunter', 'guard', 'knight', 'wolfking', 'evilknight', 'wolfbeauty'].includes(role)) { draft.roles[role] = draft.roles[role] ? 0 : 1; render(); }
+          if (['seer', 'witch', 'hunter', 'guard', 'knight', 'wolfking', 'evilknight', 'wolfbeauty', 'mixedblood'].includes(role)) { draft.roles[role] = draft.roles[role] ? 0 : 1; render(); }
           break;
         }
         case 'RECOMMEND_ROLES': draft.roles = recommendedRoles(draft.playerCount); render(); break;

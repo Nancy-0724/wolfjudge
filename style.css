@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.6.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.7.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -660,3 +660,29 @@ body[data-theme="night"] .role-icon[data-role-icon="wolfbeauty"] { color: #efb0c
 /* 沿用 camp-group / private-role-panel 的陣營配色；公開號碼不標陣營。 */
 .camp-group .role-icon[data-role-icon="wolfbeauty"],
 .private-role-panel .role-icon[data-role-icon="wolfbeauty"] { color: var(--camp-color); }
+
+/* V1.7：混血兒僅在配置、私人身份與終局使用琥珀色，公開號碼不標記歸屬。 */
+.camp-mixed { --camp-color: #875b18; --camp-border: #c69f57; --camp-bg: #faf0d8; --camp-on: #fffaf1; }
+body[data-theme="night"] .camp-mixed { --camp-color: #f0cf8a; --camp-border: #b99550; --camp-bg: #393221; --camp-on: #322917; }
+.role-icon[data-role-icon="mixedblood"] { color: #a07129; }
+body[data-theme="night"] .role-icon[data-role-icon="mixedblood"] { color: #efd092; }
+.camp-group .role-icon[data-role-icon="mixedblood"], .private-role-panel .role-icon[data-role-icon="mixedblood"] { color: var(--camp-color); }
+.side-counts { display: grid; grid-template-columns: repeat(3, minmax(0,1fr)); gap: 8px; margin: 20px 0 0; }
+.side-counts > div { display: flex; justify-content: center; align-items: center; gap: 9px; padding: 10px 5px; background: var(--surface-2); border: 1px solid var(--line); border-radius: 13px; }
+.side-counts span { font-size: 15px; font-weight: 600; }
+.side-counts strong { font-size: 26px; font-weight: 750; line-height: 1.4; }
+.side-count-note { font-size: 15px; line-height: 1.6; color: var(--muted); margin: 8px 0 0; }
+.camp-group.camp-mixed .summary-grid { grid-template-columns: 1fr; }
+.camp-group.camp-mixed .summary-item { display: grid; grid-template-columns: 46px 1fr auto; grid-template-rows: auto auto; gap: 4px 12px; padding: 17px; min-height: 90px; text-align: left; }
+.camp-group.camp-mixed .summary-item .role-presence { grid-column: 2; grid-row: 1; justify-self: start; }
+.camp-group.camp-mixed .summary-item .summary-icon { grid-column: 1; grid-row: 1/3; margin: 0; }
+.camp-group.camp-mixed .summary-item h3 { grid-column: 2; grid-row: 2; margin: 2px 0 0; font-size: 20px; }
+.camp-group.camp-mixed .summary-item .summary-count { grid-column: 3; grid-row: 1/3; }
+.mixed-outcome { text-align: left; padding: 18px; border: 1px solid var(--camp-border); background: var(--camp-bg); border-radius: 17px; margin: 20px 0; }
+.mixed-outcome-heading { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; color: var(--camp-color); font-size: 18px; }
+.mixed-outcome p { color: var(--ink); font-size: 16px; line-height: 1.65; margin: 10px 0 0; }
+.outcome-badge { display: inline-block; border: 1px solid currentColor; border-radius: 7px; padding: 1px 8px; font-size: 13px; font-weight: 700; margin-top: 5px; }
+.mixed-outcome-heading .outcome-badge { margin: 0 0 0 auto; font-size: 16px; }
+.mixed-result-item { background: var(--camp-bg); border-color: var(--camp-border); }
+.identity-item > div { min-width: 0; }
+@media (max-width: 350px) { .side-counts > div { gap: 5px; } .side-counts span { font-size: 13px; } .side-counts strong { font-size: 23px; } .camp-group.camp-mixed .summary-item { padding: 12px; gap: 4px 8px; } }
