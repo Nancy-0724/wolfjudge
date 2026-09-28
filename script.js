@@ -1,5 +1,5 @@
 /*
- * 狼人殺自動法官 V1.8.0
+ * 狼人殺自動法官 V1.8.2
  * 無外部函式庫、後端或網路請求；使用 GitHub Pages 即可。
  *
  * 區段：①角色與純規則 ②狀態轉換 ③儲存/語音/計時 ④畫面 ⑤事件。
@@ -14,7 +14,7 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.8.0';
+  const VERSION = '1.8.2';
   // 只在夜間角色閉眼指令完成後緩衝；不延遲睜眼後的操作。
   const NIGHT_BUFFER_MS = 3000;
   const SCHEMA = 7;
@@ -187,6 +187,19 @@
   function roleActor(game, role) {
     if (!game.night) return null;
     return game.players.find(p => p.role === role && game.night.aliveAtStart.includes(p.id)) || null;
+  }
+  // 夜間操作資格一律以入夜名單為準：本夜中刀者尚未結算，仍必須完成能力。
+  function hasNightActor(game, role) {
+    const aliveAtStart = game?.night?.aliveAtStart;
+    if (!Array.isArray(aliveAtStart)) return false;
+    return game.players.some(player => aliveAtStart.includes(player.id) &&
+      (role === 'wolf' ? player.camp === 'wolf' : player.role === role));
+  }
+  function canSkipInactiveNight(game) {
+    if (game?.status !== 'playing' || game.phase !== 'NIGHT_WAIT') return false;
+    const step = activeStep(game);
+    return !!(step && configuredNightSteps(game).includes(step) &&
+      game.night.completed[step.role] === true && !hasNightActor(game, step.role));
   }
   function configuredNightSteps(game) {
     // round=0 用於開局預覽；首夜角色不能因「已選定」或生死改變本夜排序。
@@ -723,9 +736,7 @@
           if (wakeStep) {
             const role = wakeStep.role;
             g.night.activeRole = role;
-            const available = role === 'wolf'
-              ? g.players.some(p => p.camp === 'wolf' && g.night.aliveAtStart.includes(p.id))
-              : !!roleActor(g, role);
+            const available = hasNightActor(g, role);
             if (available) {
               g.phase = wakeStep.select;
               if (isRoleBlocked(g, role)) {
@@ -797,9 +808,13 @@
         expect(g, 'MAGIC_SELECT', 'MAGIC_EXHAUSTED'); const actor = requireNightAbility(g, 'magician');
         log(g, 'magic_pass', { source: actor.id }); completeRole(g, 'magician'); break;
       }
+      case 'SKIP_INACTIVE':
       case 'FINISH_SLOT':
         expect(g, 'NIGHT_WAIT');
-        assert(g.night.completed[g.night.activeRole], '本階段尚未完成。');
+        assert(canSkipInactiveNight(g), '本階段仍有行動者，不能略過。');
+        if (type === 'SKIP_INACTIVE') log(g, 'night_wait_skipped', { role: g.night.activeRole });
+        // 只略過剩餘操作時間；仍接原閉眼主持詞與三秒緩衝，絕不直接跳到下一位。
+        g.selected = null; g.swapSelection = [];
         g.phase = activeStep(g).sleep; break;
       case 'SELECT':
         assert(SELECT_PHASES.has(g.phase), '目前不是選擇目標階段。');
@@ -1128,6 +1143,7 @@
               !n.swapPair.every(id => legalId(id) && n.aliveAtStart.includes(id) && g.swapUsedIds.includes(id)) ||
               !roleActor(g, 'magician') || !n.completed.magician || isRoleBlocked(g, 'magician')) return false;
         }
+        if (g.phase === 'NIGHT_WAIT' && !canSkipInactiveNight(g)) return false;
         if (g.phase === 'NIGHT_BLOCKED' && (!isRoleBlocked(g, n.activeRole) || n.completed[n.activeRole])) return false;
         if (g.phase === 'MAGIC_EXHAUSTED' && (n.activeRole !== 'magician' || swapCandidates(g).length >= 2)) return false;
       }
@@ -1404,7 +1420,7 @@
       getWinner, resolveNight, canDeathSkill, eligibleTargets, validGame, recommendedRoles,
       roleActor, currentDeath, isNight, isSlotPhase, configuredNightSteps, endIfWinner,
       availableDayAction, markDeath, makeResolution, advanceResolution, startNight, ROLE_ORDER, SCHEMA, RULESET,
-      MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, CHARM_RULES, maySkipSeer, nightOpenText,
+      MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, CHARM_RULES, hasNightActor, canSkipInactiveNight, maySkipSeer, nightOpenText,
       isRoleBlocked, swapDestination, effectiveNightTarget, wolfVictim, swapCandidates,
       AUTO_PHASES, SELECT_PHASES, PHASES, BLOCKABLE_NIGHT_ROLES,
       resolveCharm, livingCounts, playerOutcomes, migrateGame, latestDeathPlayers, publicVoteText, publicSkillText,
@@ -1563,10 +1579,10 @@
       <p><strong>死亡技能：</strong>獵人被狼刀、放逐、帶人、魅惑或同守同救致死可帶一名存活玩家，含毒死因不行。技能可放棄。公開介面只問「你要啟動技能嗎？」，不顯示身份或專屬圖示。</p>
       <p><strong>屠邊與 B 反擊規則：</strong>除上述最後狼美人的有效魅惑例外，全部狼人陣營死亡優先判好人勝；否則村民全滅或神職全滅，狼人勝。夜間效果同批結算。<strong>出現勝利條件但仍有獵人合法反擊時，跳過遺言、先反擊再判勝負。</strong>狼王沒有這項保障：最後狼王出局（含自爆）直接好人勝，不再帶人。</p>
       <p><strong>遺言：</strong>尚未終局的一般夜死、放逐及技能帶人有遺言；騎士決鬥與自爆者沒有。終局前反擊不安排遺言，結束後也不補。多人夜死按號碼順序處理。</p>
-      <p><strong>操作時間：</strong>完成可立即結束；逾時只低頻閃紅催促，仍能選擇、返回與確認。已配置但已死亡的夜間角色保留等待時段，時間差仍可能成為推理線索。</p>
+      <p><strong>操作時間：</strong>完成可立即結束；逾時只低頻閃紅催促，仍能選擇、返回與確認。已配置但無存活行動者的夜間角色保留主持與等待頁，可按「跳過」提前結束；未操作仍會倒數。跳過後照常閉眼並緩衝 3 秒，時間與點擊仍可能成為推理線索。</p>
       <p><strong>資訊保護：</strong>私密身份、夜間目標與查驗結果不朗讀。切換 App 或暫停會遮蔽。沒有操作碼，網站不能驗證拿手機的人，禁止試點他人號碼；所有玩家仍須遵守閉眼規則。</p>
       <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版新增夢魘與魔術師，混血兒規則不變。V1.3～V1.7 舊局可按原配置延續，但不能中途加入角色；V1.2 及更早的舊局不相容。</p>
-      <p><strong>V1.8 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
+      <p><strong>V1.8.2 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
     </div></details>`;
   }
 
@@ -1969,7 +1985,7 @@
     const stored = savedEnvelope?.game;
     const resume = stored ? `<div class="resume-card"><div class="resume-text"><strong>${stored.status === 'finished' ? '上一局已結束' : '有一局尚未結束'}</strong><p>${stored.round ? `第 ${stored.round} 回合` : '身份分配階段'} · ${stored.config.playerCount} 人</p></div></div>` : '';
     return `<div class="page"><section class="panel home-panel">
-      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.8</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
+      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.8.2</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
       <p class="home-copy">十三種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
       ${resume}<div class="actions">${stored ? btn(stored.status === 'finished' ? '查看上一局結果' : '繼續上次遊戲', 'LOAD_GAME') : ''}${btn(`開始新遊戲 ${icons.arrow}`, 'NEW_GAME', stored ? 'secondary' : 'primary')}</div>
       <div class="home-features"><div class="feature"><strong>一機輪流</strong>不用實體身份牌</div><div class="feature"><strong>語音帶局</strong>夜間流程自動推進</div><div class="feature"><strong>自動結算</strong>記錄死亡與勝負</div></div>
@@ -2202,12 +2218,25 @@
     return playPage(`<div class="play-phase-label">第 ${game.round} ${kind === 'sun' ? '天' : '夜'}</div>${symbol(kind)}<h1 class="cue-title">${title}</h1>${buffer}${manual ? '<p class="cue-hint">讀出提示後繼續</p>' : ''}`, controls, 'center cue-panel');
   }
 
+  // V1.8.2：身份交接／閱讀使用獨立視窗布局。按鈕不進入捲動區；
+  // 能力原文完整保留，極小視窗或放大字體時可捲內文，不裁字、不自動確認。
+  function identityPage(content, action, label, cls) {
+    return `<div class="page identity-page"><section class="panel identity-viewport center ${cls}">
+      <div class="identity-page-header"><div class="privacy-label">${icons.lock} ${label}</div>
+        <span class="identity-progress">${game.revealIndex + 1} / ${game.players.length}</span></div>
+      <div class="identity-reading" tabindex="0" aria-label="身份內容，可上下捲動">${content}</div>
+      <div class="identity-footer"><div class="actions">${action}</div></div>
+    </section></div>`;
+  }
   function renderGame() {
     if (AUTO_PHASES.has(game.phase)) return autoPage();
     switch (game.phase) {
       case 'ROLE_HANDOFF': {
         const p = game.players[game.revealIndex];
-        return panel(`<div class="privacy-label">${icons.lock} 私密身份</div><p class="muted no-margin">請將手機交給</p><div class="big-player">${p.id}<small>號玩家</small></div><h2>其他玩家請勿觀看</h2><p class="muted small">拿穩手機、避開旁人視線，再打開身份。</p><div class="actions">${btn(`我是 ${p.id} 號，查看身份`, 'REVEAL')}</div>${progressDots()}<p class="tiny muted no-margin">第 ${game.revealIndex + 1} 位，共 ${game.players.length} 位</p>`, 'center');
+        return identityPage(`<div class="handoff-content"><p class="muted no-margin">請將手機交給</p>
+          <div class="big-player">${p.id}<small>號玩家</small></div><h2>其他玩家請勿觀看</h2>
+          <p class="handoff-reminder">拿穩手機、避開旁人視線，再打開身份。</p>${progressDots()}</div>`,
+          btn(`我是 ${p.id} 號，查看身份`, 'REVEAL'), '私密身份', 'handoff-role-panel');
       }
       case 'ROLE_REVEAL': {
         const p = game.players[game.revealIndex], r = ROLES[p.role];
@@ -2216,15 +2245,14 @@
         const camp = CAMP_PRESENTATION[group];
         const mixed = r.followsModel === true;
         const category = mixed ? '屠邊分類：平民' : r.category === 'god' ? '神職' : r.category === 'villager' ? '村民' : null;
-        return panel(`<div class="privacy-label">${icons.lock} ${p.id} 號玩家專屬</div>
-          <div class="identity-card camp-${group}">
+        return identityPage(`<div class="identity-card camp-${group}">
             <div class="identity-camp-banner"><strong>${camp.headline}</strong><span>${mixed ? '不告知陣營' : camp.name}</span></div>
-            ${roleIcon(p.role, 'identity-icon')}<h1>${r.name}</h1>
-            ${category ? `<span class="identity-category">${category}</span>` : ''}
+            <div class="identity-role-line">${roleIcon(p.role, 'identity-icon')}<div class="identity-role-name"><h1>${r.name}</h1>
+              ${category ? `<span class="identity-category">${category}</span>` : ''}</div></div>
             <p class="identity-goal">${!mixed && game.config.roles.wolfbeauty && p.camp === 'good' ? '目標：淘汰所有狼人，並避免最後狼美人的魅惑造成屠邊。' : camp.goal}</p>
-            ${p.camp === 'wolf' ? `<div class="teammates"><span>你的狼人隊友</span><br><strong>${teammates.length ? teammates.map(x => `${x.id} 號`).join('、') : '本局沒有其他狼人隊友'}</strong></div>` : ''}
-          </div>
-          <p class="identity-description">${r.description}</p><div class="actions">${btn('我記住了，隱藏身份', 'REMEMBER')}</div><p class="tiny muted gap-top no-margin">身份不會朗讀，也不能返回上一位。</p>`, 'center private-role-panel');
+            ${p.camp === 'wolf' ? `<div class="teammates"><span>你的狼人隊友</span><strong>${teammates.length ? teammates.map(x => `${x.id} 號`).join('、') : '本局沒有其他狼人隊友'}</strong></div>` : ''}
+          </div><p class="identity-description">${r.description}</p>`,
+          btn('我記住了，隱藏身份', 'REMEMBER'), `${p.id} 號玩家專屬`, 'private-role-panel');
       }
       case 'ROLE_COMPLETE':
         return panel(`${symbol('check')}${heading('所有身份已確認', '請把手機放到桌面中央。', '準備開始', true)}
@@ -2247,7 +2275,9 @@
         return playPage(`${ribbon()}<div class="big-player">${game.night.seerTarget}<small>號</small></div><div class="result-emblem">${game.night.seerResult === 'wolf' ? '狼人' : '好人'}</div>`, btn('看完', 'ACK_SEER'), 'center seer-result-panel');
       case 'WITCH_HEAL': case 'WITCH_POISON': case 'WITCH_DONE': return renderWitch();
       case 'NIGHT_WAIT':
-        return playPage(`${ribbon()}${symbol('moon')}<h1 class="cue-title">請保持閉眼</h1>`, '', 'center cue-panel');
+        // 公開主持不宣告死亡身份或「無人行動」，畫面只提供中性的一鍵跳過。
+        return playPage(`${ribbon()}${symbol('moon')}<h1 class="cue-title">請保持閉眼</h1>`,
+          canSkipInactiveNight(game) ? btn('跳過', 'SKIP_INACTIVE') : '', 'center cue-panel');
       case 'LAST_WORDS': {
         const list = game.resolution.lastWordsQueue;
         return playPage(`${publicNoticeHTML()}<div class="play-phase-label">第 ${game.round} 天 · 遺言</div><div class="big-player">${list[0]}<small>號玩家</small></div><h1>請發表遺言</h1>${list.length > 1 ? `<p class="words-next">下一位：${list.slice(1).map(id => `${id} 號`).join('、')}</p>` : ''}`, btn('遺言結束', 'ACK_WORDS'), 'center words-panel');
@@ -2332,6 +2362,7 @@
       case 'witch_poison': return `女巫使用毒藥，毒 ${target} 號${redirected}。`;
       case 'witch_pass': return '女巫本晚未使用藥品。';
       case 'role_inactive': return `${ROLES[entry.role]?.name || '此角色'}無存活行動者，本晚保留主持流程。`;
+      case 'night_wait_skipped': return `${ROLES[entry.role]?.name || '此角色'}的等待時段已手動提前結束。`;
       case 'night_result': return entry.deaths.length ? `夜間死亡：${entry.deaths.map(id => `${id} 號`).join('、')}。` : '夜間結果：平安夜。';
       case 'vote_result': return target === null ? '投票結果：沒有人出局。' : `投票結果：${target} 號被放逐。`;
       case 'death_skill': return `${entry.source} 號${ROLES[playerById(game, entry.source).role].name}啟動技能，帶走 ${target} 號。`;
@@ -2364,7 +2395,10 @@
     const nightTheme = view === 'game' && (paused || isNight(game) || game.status === 'reveal' || (game.phase === 'GAME_OVER' && game.winner.camp === 'wolf'));
     document.body.dataset.theme = nightTheme ? 'night' : 'day';
     document.getElementById('theme-color').setAttribute('content', nightTheme ? '#101d1c' : '#f4f1e8');
-    document.body.dataset.mode = view === 'game' && active && !paused && !foreignUpdate && game.status === 'playing' ? 'play' : 'standard';
+    const identityView = view === 'game' && active && !paused && !foreignUpdate &&
+      ['ROLE_HANDOFF', 'ROLE_REVEAL'].includes(game.phase);
+    document.body.dataset.mode = identityView ? 'identity' :
+      view === 'game' && active && !paused && !foreignUpdate && game.status === 'playing' ? 'play' : 'standard';
     const focusAction = document.activeElement?.dataset?.action;
     const focusId = document.activeElement?.dataset?.id;
     const focusChoice = document.activeElement?.dataset?.choice;
@@ -2377,7 +2411,7 @@
     // 私密內容不使用 aria-live，以免輔助朗讀器自動念出身份。
     if (view === 'game' && active && !paused && !foreignUpdate && game.status !== 'finished') {
       toolbar.innerHTML = `<button type="button" class="icon-button" data-action="REPLAY" aria-label="重播公開主持詞" title="重播公開主持詞" ${!safeReplayPrompt() ? 'disabled' : ''}>${icons.audio}<span class="toolbar-label">重播</span></button><button type="button" class="icon-button" data-action="PAUSE" aria-label="暫停並遮蔽畫面" title="暫停">${icons.pause}</button>`;
-    } else toolbar.innerHTML = '<span class="version-pill">V1.8</span>';
+    } else toolbar.innerHTML = '<span class="version-pill">V1.8.2</span>';
     renderNotice(); renderFooter(); updateVoiceOptions(); updateTimerDOM();
   }
 
@@ -2448,7 +2482,7 @@
   }
 
   const ENGINE_ACTIONS = new Set([
-    'ACK_BLOCKED', 'PASS_MAGIC', 'PASS_FEAR', 'CONFIRM_FEAR', 'CONFIRM_SWAP',
+    'SKIP_INACTIVE', 'ACK_BLOCKED', 'PASS_MAGIC', 'PASS_FEAR', 'CONFIRM_FEAR', 'CONFIRM_SWAP',
     'AUTO', 'UI_COMMIT', 'UI_ALTERNATIVE',
     'REVEAL', 'REMEMBER', 'START', 'REVIEW', 'BACK', 'CONFIRM_GUARD', 'CONFIRM_WOLF', 'CONFIRM_MODEL', 'CONFIRM_CHARM', 'CONFIRM_SEER',
     'ACK_SEER', 'PASS_SEER', 'CONFIRM_PASS_SEER', 'CHOOSE_HEAL', 'CONFIRM_HEAL', 'SKIP_HEAL', 'PASS_POISON',
@@ -2457,12 +2491,19 @@
     'CONFIRM_VOTE', 'CONTINUE_NO_VOTE', 'NEXT_NIGHT', 'SHOW_ROLES', 'SHOW_HISTORY',
     'CANCEL_DAY_ACTION', 'START_DAY_ACTION', 'CONFIRM_DUEL', 'CONFIRM_SELF_DESTRUCT'
   ]);
+  let identityTapUntil = 0; // 相同位置的查看／隱藏按鈕防連點，不加閱讀時限。
   let lastClickKey = '';
   let lastClickAt = -1000;
   document.addEventListener('click', event => {
     const button = event.target.closest('button[data-action]');
     if (!button || button.disabled || actionBusy) return;
     const action = button.dataset.action;
+    if (action === 'REVEAL' || action === 'REMEMBER') {
+      if (performance.now() < identityTapUntil) return;
+      identityTapUntil = performance.now() + 450;
+    }
+    // 倒數結束與點擊同時發生、或快速重點時，不再對下一階段執行跳過。
+    if (action === 'SKIP_INACTIVE' && !canSkipInactiveNight(game)) return;
     const clickKey = `${action}:${button.dataset.id || ''}:${button.dataset.role || ''}:${button.dataset.delta || ''}:${button.dataset.choice || ''}`;
     if (clickKey === lastClickKey && performance.now() - lastClickAt < 220) return;
     lastClickKey = clickKey; lastClickAt = performance.now();
