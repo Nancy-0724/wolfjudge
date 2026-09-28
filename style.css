@@ -1,4 +1,4 @@
-/* 狼人殺自動法官 V1.7.0 · 手機優先，無外部字型或圖片依賴。 */
+/* 狼人殺自動法官 V1.8.0 · 手機優先，無外部字型或圖片依賴。 */
 :root {
   color-scheme: light;
   --bg: #f4f1e8;
@@ -686,3 +686,15 @@ body[data-theme="night"] .role-icon[data-role-icon="mixedblood"] { color: #efd09
 .mixed-result-item { background: var(--camp-bg); border-color: var(--camp-border); }
 .identity-item > div { min-width: 0; }
 @media (max-width: 350px) { .side-counts > div { gap: 5px; } .side-counts span { font-size: 13px; } .side-counts strong { font-size: 23px; } .camp-group.camp-mixed .summary-item { padding: 12px; gap: 4px 8px; } }
+
+/* V1.8：夢魘／魔術師沿用陣營卡；公開玩家號碼不揭露身份。 */
+.role-icon[data-role-icon="nightmare"] { color: #765282; }
+.role-icon[data-role-icon="magician"] { color: #486c93; }
+body[data-theme="night"] .role-icon[data-role-icon="nightmare"] { color: #d7b8e6; }
+body[data-theme="night"] .role-icon[data-role-icon="magician"] { color: #b4d2f4; }
+.camp-group .role-icon[data-role-icon="nightmare"], .camp-group .role-icon[data-role-icon="magician"],
+.private-role-panel .role-icon[data-role-icon="nightmare"], .private-role-panel .role-icon[data-role-icon="magician"] { color: var(--camp-color); }
+.play-grid .swap-spent { border-style: dashed; }
+.play-grid .swap-spent:disabled { opacity: .55; }
+.swap-spent-label { display: block; font-size: 13px; line-height: 1.25; margin-top: 5px; }
+.blocked-panel .cue-title { max-width: 12em; }

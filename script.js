@@ -1,5 +1,5 @@
 /*
- * 狼人殺自動法官 V1.7.0
+ * 狼人殺自動法官 V1.8.0
  * 無外部函式庫、後端或網路請求；使用 GitHub Pages 即可。
  *
  * 區段：①角色與純規則 ②狀態轉換 ③儲存/語音/計時 ④畫面 ⑤事件。
@@ -14,19 +14,32 @@
 (function () {
   'use strict';
 
-  const VERSION = '1.7.0';
+  const VERSION = '1.8.0';
   // 只在夜間角色閉眼指令完成後緩衝；不延遲睜眼後的操作。
   const NIGHT_BUFFER_MS = 3000;
-  const SCHEMA = 6;
-  const RULESET = 'v1.7-mixedblood-fixed-villager-hidden-model-victory';
+  const SCHEMA = 7;
+  const RULESET = 'v1.8-nightmare-nightly-magician-once-per-number';
+  const V17_RULESET = 'v1.7-mixedblood-fixed-villager-hidden-model-victory';
   const V16_RULESET = 'v1.6-mandatory-charm-last-wolf-exception-hunter-laststand';
   const LEGACY_RULESET = 'v1.3-five-min-evil-once-poison-first-day-retaliation';
   const MIN_PLAYERS = 5;
   const MAX_PLAYERS = 18;
-  const ROLE_ORDER = ['wolf', 'wolfking', 'evilknight', 'wolfbeauty', 'villager', 'mixedblood', 'seer', 'witch', 'hunter', 'guard', 'knight'];
+  const ROLE_ORDER = ['wolf', 'wolfking', 'evilknight', 'wolfbeauty', 'nightmare', 'villager', 'mixedblood', 'seer', 'witch', 'hunter', 'guard', 'knight', 'magician'];
 
   // 擴充入口一：角色定義。新增角色亦須新增其規則、互動頁面與測試。
   const ROLES = Object.freeze({
+    nightmare: {
+      name: '夢魘', seal: '夢', camp: 'wolf', category: 'wolf', max: 1,
+      summary: '每晚恐懼一人，不可連恐',
+      description: '每晚可恐懼一名其他存活玩家，也可不使用；不可連續兩晚恐懼同一人。封鎖對方當晚的主動夜間能力；恐懼真正狼人使全狼隊停刀。混血兒榜樣、惡靈被動及天亮後技能不受影響。參與共同狼刀，可自爆，無帶人技能。',
+      deathSkill: null, selfDestruct: true
+    },
+    magician: {
+      name: '魔術師', seal: '換', camp: 'good', category: 'god', max: 1,
+      summary: '每晚交換兩號，用過不再換',
+      description: '每晚可交換兩名存活玩家的夜間作用對象，也可不交換，能選自己。每個號碼整局只可參與一次成功交換。交換狼刀、守護、查驗與毒藥；女巫看實際刀口，解藥直接救該人。不交換恐懼、魅惑、榜樣、反傷及白天技能。被恐懼不消耗號碼。',
+      deathSkill: null
+    },
     mixedblood: {
       // camp 用於查驗／決鬥／魅惑，永遠不因榜樣改變。個人勝負另存 modelBond。
       name: '混血兒', seal: '混', camp: 'good', category: 'villager', max: 1,
@@ -85,7 +98,7 @@
     witch: {
       name: '女巫', seal: '巫', camp: 'good', category: 'god', max: 1,
       summary: '解藥、毒藥各一次',
-      description: '解藥、毒藥各一瓶；不可自救或自毒，同晚只用一瓶。只有解藥尚在時可看狼刀目標，解藥用完後不再顯示號碼。',
+      description: '解藥、毒藥各一瓶；不可自救，毒藥不可直接選自己，同晚只用一瓶。解藥尚在才能看刀，用完不再顯示號碼。若有交換，顯示實際刀口，毒藥也可能間接轉到自己。',
       deathSkill: null
     },
     hunter: {
@@ -117,6 +130,10 @@
     { role: 'mixedblood', label: '混血兒', firstNightOnly: true,
       wake: 'MIXED_WAKE', sleep: 'MIXED_SLEEP', select: 'MIXED_SELECT',
       openText: '混血兒請睜眼。請選擇一名其他玩家作為榜樣。', closeText: '混血兒請閉眼。' },
+    { role: 'nightmare', label: '夢魘', wake: 'FEAR_WAKE', sleep: 'FEAR_SLEEP', select: 'FEAR_SELECT',
+      openText: '夢魘請睜眼。請選擇今晚要恐懼的玩家，或選擇不恐懼。', closeText: '夢魘請閉眼。' },
+    { role: 'magician', label: '魔術師', wake: 'MAGIC_WAKE', sleep: 'MAGIC_SLEEP', select: 'MAGIC_SELECT',
+      openText: '魔術師請睜眼。請選擇兩個號碼交換，或選擇不交換。', closeText: '魔術師請閉眼。' },
     { role: 'guard', label: '守衛', wake: 'GUARD_WAKE', sleep: 'GUARD_SLEEP', select: 'GUARD_SELECT',
       openText: '守衛請睜眼。請選擇今晚要守護的玩家，或選擇不守護。', closeText: '守衛請閉眼。' },
     { role: 'wolf', label: '狼人', wake: 'WOLF_WAKE', sleep: 'WOLF_SLEEP', select: 'WOLF_SELECT',
@@ -143,14 +160,16 @@
   });
 
   const AUTO_PHASES = new Set([
+    'FEAR_WAKE', 'FEAR_SLEEP', 'MAGIC_WAKE', 'MAGIC_SLEEP',
     'NIGHT_START', 'GUARD_WAKE', 'GUARD_SLEEP', 'WOLF_WAKE', 'WOLF_SLEEP', 'SEER_WAKE', 'SEER_SLEEP',
     'WITCH_WAKE', 'WITCH_SLEEP', 'BEAUTY_WAKE', 'BEAUTY_SLEEP', 'MIXED_WAKE', 'MIXED_SLEEP', 'NIGHT_RESOLVE', 'DAWN'
   ]);
   const SELECT_PHASES = new Set([
-    'MIXED_SELECT',
+    'FEAR_SELECT', 'MAGIC_SELECT', 'MIXED_SELECT',
     'GUARD_SELECT', 'WOLF_SELECT', 'BEAUTY_SELECT', 'SEER_SELECT', 'WITCH_POISON', 'DEATH_SKILL_SELECT', 'DAY_VOTE_RESULT', 'KNIGHT_SELECT'
   ]);
   const PHASES = new Set([
+    'NIGHT_BLOCKED', 'MAGIC_EXHAUSTED', 'FEAR_CONFIRM', 'MAGIC_CONFIRM',
     'ROLE_HANDOFF', 'ROLE_REVEAL', 'ROLE_COMPLETE', ...AUTO_PHASES,
     ...SELECT_PHASES, 'MIXED_CONFIRM', 'GUARD_CONFIRM', 'WOLF_CONFIRM', 'BEAUTY_CONFIRM', 'SEER_CONFIRM', 'SEER_RESULT', 'SEER_PASS_CONFIRM',
     'WITCH_HEAL', 'WITCH_HEAL_CONFIRM', 'WITCH_POISON_CONFIRM', 'WITCH_PASS_CONFIRM',
@@ -188,6 +207,56 @@
       candidate.total === NIGHT_BUFFER_MS && Number.isFinite(candidate.remaining) &&
       candidate.remaining >= 0 && candidate.remaining <= NIGHT_BUFFER_MS;
   }
+  const BLOCKABLE_NIGHT_ROLES = Object.freeze(['magician', 'guard', 'wolfbeauty', 'seer', 'witch']);
+  const SWAPPABLE_TARGETS = Object.freeze(['wolfTarget', 'guardedTarget', 'seerTarget', 'poisonTarget']);
+  function fearedPlayer(game) {
+    return game.night && integer(game.night.fearTarget) ? playerById(game, game.night.fearTarget) : null;
+  }
+  function isRoleBlocked(game, role) {
+    const target = fearedPlayer(game);
+    if (!target) return false;
+    if (role === 'wolf') return target.camp === 'wolf';
+    return BLOCKABLE_NIGHT_ROLES.includes(role) && roleActor(game, role)?.id === target.id;
+  }
+  function requireNightAbility(game, role) {
+    const actor = role === 'wolf'
+      ? game.players.find(p => p.camp === 'wolf' && game.night.aliveAtStart.includes(p.id))
+      : roleActor(game, role);
+    assert(actor && game.night.activeRole === role && !game.night.completed[role] &&
+      !isRoleBlocked(game, role), role === 'wolf' ? '今晚無法襲擊。' : '今晚無法使用技能。');
+    return actor;
+  }
+  function swapDestination(game, originalId) {
+    // 僅讀取當夜一組交換，不改原號碼、角色或技能來源，也不反覆映射。
+    if (originalId === null || originalId === undefined) return null;
+    const pair = game.night?.swapPair;
+    if (!pair) return originalId;
+    if (originalId === pair[0]) return pair[1];
+    if (originalId === pair[1]) return pair[0];
+    return originalId;
+  }
+  function effectiveNightTarget(game, field) {
+    assert(SWAPPABLE_TARGETS.includes(field), '這項能力不在交換範圍。');
+    const role = { wolfTarget: 'wolf', guardedTarget: 'guard', seerTarget: 'seer', poisonTarget: 'witch' }[field];
+    if (isRoleBlocked(game, role)) return null;
+    return swapDestination(game, game.night?.[field] ?? null);
+  }
+  function wolfVictim(game) { return effectiveNightTarget(game, 'wolfTarget'); }
+  function mappedLog(game, field, data) {
+    const actual = effectiveNightTarget(game, field);
+    return actual === data.target ? data : { ...data, actualTarget: actual };
+  }
+  function swapCandidates(game) {
+    const actor = roleActor(game, 'magician');
+    if (!actor || isRoleBlocked(game, 'magician')) return [];
+    return game.night.aliveAtStart.filter(id => !game.swapUsedIds.includes(id));
+  }
+  function requireSwapPair(game) {
+    const pair = game.swapSelection;
+    assert(Array.isArray(pair) && pair.length === 2 && pair[0] !== pair[1] &&
+      pair.every(id => integer(id) && swapCandidates(game).includes(id)), '請選擇兩個不同且未交換過的存活號碼。');
+    return [...pair];
+  }
   function maySkipSeer(game) {
     // 根據開局配置固定顯示；不能隨惡靈死亡或反傷已使用而改變，避免洩漏狀態。
     return (game.config.roles.evilknight || 0) > 0;
@@ -201,7 +270,7 @@
   function isNight(game) {
     return !!game && game.status === 'playing' &&
       (game.phase === 'NIGHT_START' || game.phase === 'NIGHT_RESOLVE' ||
-        game.phase === 'NIGHT_WAIT' || /^(MIXED|GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase));
+        game.phase === 'NIGHT_WAIT' || game.phase === 'NIGHT_BLOCKED' || /^(FEAR|MAGIC|MIXED|GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase));
   }
   function isSlotPhase(game) {
     return isNight(game) && !AUTO_PHASES.has(game.phase);
@@ -226,7 +295,7 @@
       else total += value;
     }
     if (total !== config.playerCount) errors.push(`已配置 ${total} 位，須與 ${config.playerCount} 位玩家一致。`);
-    if (!ROLE_ORDER.some(role => ROLES[role].camp === 'wolf' && config.roles?.[role] > 0)) errors.push('狼人陣營至少一名：可使用普通狼人、狼王、惡靈騎士或狼美人。');
+    if (!ROLE_ORDER.some(role => ROLES[role].camp === 'wolf' && config.roles?.[role] > 0)) errors.push('狼人陣營至少一名：可使用普通狼人、狼王、惡靈騎士、狼美人或夢魘。');
     if (!ROLE_ORDER.some(role => ROLES[role].category === 'villager' && config.roles?.[role] > 0)) {
       errors.push('平民邊至少一名：普通村民或混血兒。');
     }
@@ -239,11 +308,11 @@
 
   function recommendedRoles(count) {
     // 五人只是可調整的起始配置，不強制使用惡靈騎士，也不改屠邊。
-    if (count === 5) return { wolf: 1, wolfking: 0, evilknight: 0, wolfbeauty: 0, mixedblood: 0, villager: 2,
+    if (count === 5) return { nightmare: 0, magician: 0, wolf: 1, wolfking: 0, evilknight: 0, wolfbeauty: 0, mixedblood: 0, villager: 2,
       seer: 1, witch: 0, hunter: 0, guard: 1, knight: 0 };
     const wolf = count <= 8 ? 2 : count <= 11 ? 3 : count <= 14 ? 4 : 5;
     const hunter = count >= 7 ? 1 : 0;
-    return { wolf, wolfking: 0, evilknight: 0, wolfbeauty: 0, mixedblood: 0, villager: count - wolf - 2 - hunter, seer: 1, witch: 1, hunter, guard: 0, knight: 0 };
+    return { nightmare: 0, magician: 0, wolf, wolfking: 0, evilknight: 0, wolfbeauty: 0, mixedblood: 0, villager: count - wolf - 2 - hunter, seer: 1, witch: 1, hunter, guard: 0, knight: 0 };
   }
 
   function randomInt(max) {
@@ -279,10 +348,11 @@
         alive: true, roleViewed: false,
         skills: { heal: role === 'witch' ? 1 : 0, poison: role === 'witch' ? 1 : 0, deathUsed: false,
           duelUsed: false, reflectUsed: false, lastGuardTarget: null, lastGuardRound: 0,
-          lastCharmTarget: null, lastCharmRound: 0 }
+          lastCharmTarget: null, lastCharmRound: 0, lastFearTarget: null, lastFearRound: 0 }
       })),
       night: null, vote: null, resolution: null, deathEvents: [], history: [], winner: null, ending: null,
-      dayAction: null, lastDayAction: null, charm: null, charmVictory: null, modelBond: null
+      dayAction: null, lastDayAction: null, charm: null, charmVictory: null, modelBond: null,
+      swapUsedIds: [], swapSelection: []
     };
   }
 
@@ -293,11 +363,13 @@
     game.vote = null;
     game.dayAction = null; game.lastDayAction = null;
     game.resolution = null;
+    game.swapSelection = [];
     game.charm = null; // 入下一夜即清除上晚連結；lastCharm* 只用來限制連續選人。
     game.night = {
       number: game.round, aliveAtStart: game.players.filter(p => p.alive).map(p => p.id),
       activeRole: configuredNightSteps(game)[0].role,
       completed: Object.fromEntries(NIGHT_STEPS.map(step => [step.role, !configuredNightSteps(game).includes(step)])),
+      fearTarget: null, wolfBlocked: false, swapPair: null, blockedRoles: [],
       guardedTarget: null, wolfTarget: null, charmTarget: null, seerTarget: null, seerResult: null,
       healedTarget: null, poisonTarget: null, usedHealTonight: false,
       witchNote: null, seerSkipped: false, reflection: null, immunityEvents: [], deaths: [], resolved: false
@@ -391,23 +463,33 @@
       game.modelBond.round === 1 && playerById(game, game.modelBond.targetPlayerId)),
       '混血兒尚未選定榜樣，不能跳過。');
     const beauty = roleActor(game, 'wolfbeauty');
-    assert(!beauty || (integer(n.charmTarget) && game.charm?.round === game.round &&
+    assert(!beauty || (isRoleBlocked(game, 'wolfbeauty') && n.blockedRoles.includes('wolfbeauty') && !game.charm && n.charmTarget === null) || (integer(n.charmTarget) && game.charm?.round === game.round &&
       game.charm.sourcePlayerId === beauty.id && game.charm.targetPlayerId === n.charmTarget),
       '狼美人尚未完成魅惑，不能跳過。');
     const wolves = game.players.filter(p => p.camp === 'wolf' && n.aliveAtStart.includes(p.id));
-    assert(wolves.length === 0 || n.wolfTarget !== null, '狼人尚未確認襲擊目標。');
+    assert(wolves.length === 0 || n.wolfTarget !== null ||
+      (isRoleBlocked(game, 'wolf') && n.wolfBlocked && n.blockedRoles.includes('wolf')), '狼人尚未確認襲擊目標。');
+    assert(!isRoleBlocked(game, 'wolf') || n.wolfTarget === null, '狼隊被封鎖時不可保留狼刀。');
+    for (const role of BLOCKABLE_NIGHT_ROLES) {
+      if (isRoleBlocked(game, role)) assert(n.blockedRoles.includes(role), '被封鎖的角色尚未結束操作。');
+    }
+    const attack = effectiveNightTarget(game, 'wolfTarget');
+    const protection = effectiveNightTarget(game, 'guardedTarget');
+    const poison = effectiveNightTarget(game, 'poisonTarget');
+    const inspection = effectiveNightTarget(game, 'seerTarget');
     const causes = new Map();
     function add(id, cause) {
       assert(n.aliveAtStart.includes(id), '夜間目標不在本夜存活名單中。');
       causes.set(id, [...(causes.get(id) || []), cause]);
     }
-    if (n.wolfTarget !== null) {
-      const guarded = n.guardedTarget === n.wolfTarget;
-      const healed = n.healedTarget === n.wolfTarget;
-      if (guarded && healed) add(n.wolfTarget, 'guard_heal');
-      else if (!guarded && !healed) add(n.wolfTarget, 'wolf');
+    if (attack !== null) {
+      const guarded = protection === attack;
+      // 女巫已看到實際刀口，解藥直接救此人；不可再把解藥交換回去。
+      const healed = !isRoleBlocked(game, 'witch') && n.healedTarget === attack;
+      if (guarded && healed) add(attack, 'guard_heal');
+      else if (!guarded && !healed) add(attack, 'wolf');
     }
-    if (n.poisonTarget !== null) add(n.poisonTarget, 'witch_poison');
+    if (poison !== null) add(poison, 'witch_poison');
 
     // 反傷不在預言家畫面即時消耗：必須等女巫完成後，按固定優先序處理。
     // 所有行動以入夜時存活為準；同夜被刀/被反傷不取消已確認的行動。
@@ -416,8 +498,8 @@
       if (!evil.skills.reflectUsed) {
         const witch = roleActor(game, 'witch');
         const seer = roleActor(game, 'seer');
-        const poisoned = witch && n.poisonTarget === evil.id;
-        const checked = seer && !n.seerSkipped && n.seerTarget === evil.id;
+        const poisoned = witch && poison === evil.id;
+        const checked = seer && !n.seerSkipped && inspection === evil.id;
         const victim = poisoned ? witch : checked ? seer : null;
         if (victim) {
           const trigger = poisoned ? 'witch_poison' : 'seer_check';
@@ -541,8 +623,16 @@
   }
 
   function eligibleTargets(game) {
+    if (game.phase === 'NIGHT_BLOCKED' || game.phase === 'MAGIC_EXHAUSTED') return [];
+    if (isSlotPhase(game) && isRoleBlocked(game, game.night.activeRole)) return [];
     let ids = game.players.filter(p => p.alive).map(p => p.id);
-    if (/^(MIXED|GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase)) ids = [...game.night.aliveAtStart];
+    if (/^(FEAR|MAGIC|MIXED|GUARD|WOLF|BEAUTY|SEER|WITCH)_/.test(game.phase)) ids = [...game.night.aliveAtStart];
+    if (game.phase.startsWith('FEAR_')) {
+      const actor = roleActor(game, 'nightmare');
+      const last = actor?.skills.lastFearRound === game.round - 1 ? actor.skills.lastFearTarget : null;
+      ids = actor ? ids.filter(id => id !== actor.id && id !== last) : [];
+    }
+    if (game.phase.startsWith('MAGIC_')) ids = swapCandidates(game);
     if (game.phase.startsWith('MIXED_')) {
       const actor = roleActor(game, 'mixedblood');
       ids = actor && game.round === 1 && !game.modelBond ? ids.filter(id => id !== actor.id) : [];
@@ -576,7 +666,7 @@
   }
   function completeRole(game, role, waitForSlot = false) {
     game.night.completed[role] = true;
-    game.selected = null;
+    game.selected = null; game.swapSelection = [];
     // 真正完成操作立即閉眼；無存活行動者才保留原本的等待時段。
     game.phase = waitForSlot ? 'NIGHT_WAIT' : NIGHT_STEPS.find(step => step.role === role).sleep;
   }
@@ -638,8 +728,13 @@
               : !!roleActor(g, role);
             if (available) {
               g.phase = wakeStep.select;
+              if (isRoleBlocked(g, role)) {
+                g.phase = 'NIGHT_BLOCKED';
+              } else if (role === 'magician' && swapCandidates(g).length < 2) {
+                g.phase = 'MAGIC_EXHAUSTED';
+              }
               // 解藥用完：不走狼刀目標頁，連本人被刀也不透露。
-              if (role === 'witch' && roleActor(g, 'witch').skills.heal === 0) {
+              if (role === 'witch' && g.phase !== 'NIGHT_BLOCKED' && roleActor(g, 'witch').skills.heal === 0) {
                 if (roleActor(g, 'witch').skills.poison > 0) g.phase = 'WITCH_POISON';
                 else { g.night.witchNote = 'empty'; g.phase = 'WITCH_DONE'; log(g, 'witch_pass'); }
               }
@@ -653,6 +748,54 @@
           }
         }
         break;
+      }
+      case 'ACK_BLOCKED': {
+        expect(g, 'NIGHT_BLOCKED');
+        const role = g.night.activeRole;
+        assert(isRoleBlocked(g, role), '本角色未被封鎖。');
+        if (!g.night.blockedRoles.includes(role)) {
+          g.night.blockedRoles.push(role);
+          log(g, 'ability_blocked', { role });
+        }
+        completeRole(g, role); break;
+      }
+      case 'SELECT_SWAP': {
+        expect(g, 'MAGIC_SELECT'); requireNightAbility(g, 'magician');
+        const id = action.id;
+        assert(integer(id) && swapCandidates(g).includes(id), '此號碼已交換、已出局或不可使用。');
+        const pos = g.swapSelection.indexOf(id);
+        if (pos >= 0) g.swapSelection.splice(pos, 1);
+        else {
+          assert(g.swapSelection.length < 2, '先取消一個已選號碼，再選其他人。');
+          g.swapSelection.push(id);
+        }
+        break;
+      }
+      case 'CONFIRM_FEAR': {
+        expect(g, 'FEAR_CONFIRM'); const actor = requireNightAbility(g, 'nightmare');
+        const id = requireTarget(g);
+        g.night.fearTarget = id;
+        g.night.wolfBlocked = playerById(g, id).camp === 'wolf';
+        actor.skills.lastFearTarget = id; actor.skills.lastFearRound = g.round;
+        log(g, 'fear_select', { source: actor.id, target: id });
+        completeRole(g, 'nightmare'); break;
+      }
+      case 'PASS_FEAR': {
+        expect(g, 'FEAR_SELECT'); const actor = requireNightAbility(g, 'nightmare');
+        actor.skills.lastFearTarget = null; actor.skills.lastFearRound = g.round;
+        log(g, 'fear_pass', { source: actor.id }); completeRole(g, 'nightmare'); break;
+      }
+      case 'CONFIRM_SWAP': {
+        expect(g, 'MAGIC_CONFIRM'); const actor = requireNightAbility(g, 'magician');
+        const pair = requireSwapPair(g);
+        g.night.swapPair = pair;
+        g.swapUsedIds.push(...pair); // 僅成功提交才消耗；取消／被封鎖均不消耗。
+        log(g, 'magic_swap', { source: actor.id, pair });
+        completeRole(g, 'magician'); break;
+      }
+      case 'PASS_MAGIC': {
+        expect(g, 'MAGIC_SELECT', 'MAGIC_EXHAUSTED'); const actor = requireNightAbility(g, 'magician');
+        log(g, 'magic_pass', { source: actor.id }); completeRole(g, 'magician'); break;
       }
       case 'FINISH_SLOT':
         expect(g, 'NIGHT_WAIT');
@@ -668,15 +811,16 @@
         break;
       case 'REVIEW': {
         assert(SELECT_PHASES.has(g.phase), '目前不是選擇目標階段。');
-        if (['DAY_VOTE_RESULT', 'GUARD_SELECT'].includes(g.phase) && g.selected === 0) { /* 無人出局／空守 */ }
+        if (g.phase === 'MAGIC_SELECT') requireSwapPair(g);
+        else if (['DAY_VOTE_RESULT', 'GUARD_SELECT'].includes(g.phase) && g.selected === 0) { /* 無人出局／空守 */ }
         else requireTarget(g);
-        const targets = { MIXED_SELECT: 'MIXED_CONFIRM', BEAUTY_SELECT: 'BEAUTY_CONFIRM', GUARD_SELECT: 'GUARD_CONFIRM', KNIGHT_SELECT: 'KNIGHT_CONFIRM', WOLF_SELECT: 'WOLF_CONFIRM', SEER_SELECT: 'SEER_CONFIRM',
+        const targets = { FEAR_SELECT: 'FEAR_CONFIRM', MAGIC_SELECT: 'MAGIC_CONFIRM', MIXED_SELECT: 'MIXED_CONFIRM', BEAUTY_SELECT: 'BEAUTY_CONFIRM', GUARD_SELECT: 'GUARD_CONFIRM', KNIGHT_SELECT: 'KNIGHT_CONFIRM', WOLF_SELECT: 'WOLF_CONFIRM', SEER_SELECT: 'SEER_CONFIRM',
           WITCH_POISON: 'WITCH_POISON_CONFIRM', DEATH_SKILL_SELECT: 'DEATH_SKILL_CONFIRM',
           DAY_VOTE_RESULT: 'DAY_VOTE_CONFIRM' };
         g.phase = targets[g.phase]; break;
       }
       case 'BACK': {
-        const routes = { MIXED_CONFIRM: 'MIXED_SELECT', BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT', KNIGHT_SELECT: 'DAY_ACTION_DECISION',
+        const routes = { FEAR_CONFIRM: 'FEAR_SELECT', MAGIC_CONFIRM: 'MAGIC_SELECT', MIXED_CONFIRM: 'MIXED_SELECT', BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT', KNIGHT_SELECT: 'DAY_ACTION_DECISION',
           SELF_DESTRUCT_CONFIRM: 'DAY_ACTION_DECISION', WOLF_CONFIRM: 'WOLF_SELECT', SEER_CONFIRM: 'SEER_SELECT',
           SEER_PASS_CONFIRM: 'SEER_SELECT',
           WITCH_HEAL_CONFIRM: 'WITCH_HEAL', WITCH_POISON_CONFIRM: 'WITCH_POISON',
@@ -688,7 +832,7 @@
       }
       case 'CONFIRM_MODEL': {
         expect(g, 'MIXED_CONFIRM');
-        const actor = roleActor(g, 'mixedblood');
+        const actor = requireNightAbility(g, 'mixedblood');
         assert(actor && g.round === 1 && !g.modelBond && !g.night.completed.mixedblood,
           '榜樣只能在第一夜選擇一次。');
         const id = requireTarget(g);
@@ -702,7 +846,7 @@
       }
       case 'CONFIRM_CHARM': {
         expect(g, 'BEAUTY_CONFIRM');
-        const actor = roleActor(g, 'wolfbeauty');
+        const actor = requireNightAbility(g, 'wolfbeauty');
         assert(actor && !g.night.completed.wolfbeauty, '本晚魅惑已完成或沒有可操作的狼美人。');
         const id = requireTarget(g); // 0、自己、狼隊友、已死者與上晚目標一律不合法。
         g.night.charmTarget = id;
@@ -714,56 +858,58 @@
       }
       case 'CONFIRM_GUARD': {
         expect(g, 'GUARD_CONFIRM');
-        const actor = roleActor(g, 'guard');
+        const actor = requireNightAbility(g, 'guard');
         assert(actor, '目前沒有可操作的守衛。');
         const id = g.selected === 0 ? null : requireTarget(g);
         g.night.guardedTarget = id;
         actor.skills.lastGuardTarget = id; actor.skills.lastGuardRound = g.round;
-        log(g, 'guard_protect', { source: actor.id, target: id });
+        log(g, 'guard_protect', mappedLog(g, 'guardedTarget', { source: actor.id, target: id }));
         completeRole(g, 'guard'); break;
       }
       case 'CONFIRM_WOLF':
-        expect(g, 'WOLF_CONFIRM'); g.night.wolfTarget = requireTarget(g);
-        log(g, 'wolf_attack', { target: g.night.wolfTarget }); completeRole(g, 'wolf'); break;
+        expect(g, 'WOLF_CONFIRM'); requireNightAbility(g, 'wolf'); g.night.wolfTarget = requireTarget(g);
+        log(g, 'wolf_attack', mappedLog(g, 'wolfTarget', { target: g.night.wolfTarget })); completeRole(g, 'wolf'); break;
       case 'CONFIRM_SEER': {
         expect(g, 'SEER_CONFIRM');
         const id = requireTarget(g);
-        assert(roleActor(g, 'seer'), '目前沒有可操作的預言家。');
+        requireNightAbility(g, 'seer');
         g.night.seerTarget = id; g.night.seerSkipped = false;
-        g.night.seerResult = playerById(g, id).camp;
-        log(g, 'seer_check', { target: id, result: g.night.seerResult });
+        g.night.seerResult = playerById(g, effectiveNightTarget(g, 'seerTarget')).camp;
+        log(g, 'seer_check', mappedLog(g, 'seerTarget', { target: id, result: g.night.seerResult }));
         g.phase = 'SEER_RESULT'; g.selected = null; break;
       }
       case 'PASS_SEER':
         expect(g, 'SEER_SELECT');
-        assert(maySkipSeer(g) && roleActor(g, 'seer'), '本局不可略過查驗。');
+        requireNightAbility(g, 'seer');
+        assert(maySkipSeer(g), '本局不可略過查驗。');
         g.phase = 'SEER_PASS_CONFIRM'; break;
       case 'CONFIRM_PASS_SEER':
         expect(g, 'SEER_PASS_CONFIRM');
-        assert(maySkipSeer(g) && roleActor(g, 'seer'), '本局不可略過查驗。');
+        requireNightAbility(g, 'seer');
+        assert(maySkipSeer(g), '本局不可略過查驗。');
         g.night.seerTarget = null; g.night.seerResult = null; g.night.seerSkipped = true;
         log(g, 'seer_pass'); completeRole(g, 'seer'); break;
       case 'ACK_SEER':
         expect(g, 'SEER_RESULT'); completeRole(g, 'seer'); break;
       case 'CHOOSE_HEAL': {
-        expect(g, 'WITCH_HEAL'); const witch = roleActor(g, 'witch');
+        expect(g, 'WITCH_HEAL'); const witch = requireNightAbility(g, 'witch');
         assert(witch && witch.skills.heal > 0, '解藥已使用。');
-        assert(g.night.wolfTarget !== null && g.night.wolfTarget !== witch.id, '女巫任何一晚都不可自救。');
+        assert(wolfVictim(g) !== null && wolfVictim(g) !== witch.id, '女巫任何一晚都不可自救。');
         assert(!g.night.poisonTarget && !g.night.usedHealTonight, '同一晚只能使用一瓶藥。');
         g.phase = 'WITCH_HEAL_CONFIRM'; break;
       }
       case 'CONFIRM_HEAL': {
-        expect(g, 'WITCH_HEAL_CONFIRM'); const witch = roleActor(g, 'witch');
-        assert(witch && witch.skills.heal > 0 && g.night.wolfTarget !== null &&
-          g.night.wolfTarget !== witch.id && !g.night.poisonTarget && !g.night.usedHealTonight,
+        expect(g, 'WITCH_HEAL_CONFIRM'); const witch = requireNightAbility(g, 'witch');
+        assert(witch && witch.skills.heal > 0 && wolfVictim(g) !== null &&
+          wolfVictim(g) !== witch.id && !g.night.poisonTarget && !g.night.usedHealTonight,
           '這次解藥操作不符合規則。');
-        witch.skills.heal -= 1; g.night.healedTarget = g.night.wolfTarget;
+        witch.skills.heal -= 1; g.night.healedTarget = wolfVictim(g);
         g.night.usedHealTonight = true; g.night.witchNote = 'heal';
         log(g, 'witch_heal', { target: g.night.healedTarget });
         g.phase = 'WITCH_DONE'; break;
       }
       case 'SKIP_HEAL': {
-        expect(g, 'WITCH_HEAL'); const witch = roleActor(g, 'witch');
+        expect(g, 'WITCH_HEAL'); const witch = requireNightAbility(g, 'witch');
         assert(witch, '目前沒有可操作的女巫。');
         if (witch.skills.poison > 0) { g.phase = 'WITCH_POISON'; g.selected = null; }
         else { g.night.witchNote = 'empty'; g.phase = 'WITCH_DONE'; log(g, 'witch_pass'); }
@@ -774,11 +920,11 @@
       case 'CONFIRM_PASS':
         expect(g, 'WITCH_PASS_CONFIRM'); log(g, 'witch_pass'); completeRole(g, 'witch'); break;
       case 'CONFIRM_POISON': {
-        expect(g, 'WITCH_POISON_CONFIRM'); const witch = roleActor(g, 'witch');
+        expect(g, 'WITCH_POISON_CONFIRM'); const witch = requireNightAbility(g, 'witch');
         assert(witch && witch.skills.poison > 0 && !g.night.usedHealTonight, '本晚不可使用毒藥。');
         const id = requireTarget(g); assert(id !== witch.id, '不可對自己使用毒藥。');
         witch.skills.poison -= 1; g.night.poisonTarget = id; g.night.witchNote = 'poison';
-        log(g, 'witch_poison', { target: id }); g.selected = null; g.phase = 'WITCH_DONE'; break;
+        log(g, 'witch_poison', mappedLog(g, 'poisonTarget', { target: id })); g.selected = null; g.phase = 'WITCH_DONE'; break;
       }
       case 'ACK_WITCH':
         expect(g, 'WITCH_DONE'); completeRole(g, 'witch'); break;
@@ -949,9 +1095,41 @@
             playerById(g, g.night.charmTarget)?.camp === 'good'))) return false;
         if (typeof g.night.completed.wolfbeauty !== 'boolean') return false;
         const actor = roleActor(g, 'wolfbeauty');
-        if (actor && g.night.completed.wolfbeauty && !g.charm) return false;
-        if (g.charm && (!actor || !g.night.completed.wolfbeauty ||
+        if (actor && g.night.completed.wolfbeauty && !g.charm &&
+            !(isRoleBlocked(g, 'wolfbeauty') && g.night.blockedRoles?.includes('wolfbeauty'))) return false;
+        if (g.charm && (!actor || isRoleBlocked(g, 'wolfbeauty') || !g.night.completed.wolfbeauty ||
             actor.skills.lastCharmRound !== g.round || actor.skills.lastCharmTarget !== g.charm.targetPlayerId)) return false;
+      }
+      const legalId = id => integer(id) && id >= 1 && id <= g.players.length;
+      if (!Array.isArray(g.swapUsedIds) || g.swapUsedIds.length % 2 ||
+          new Set(g.swapUsedIds).size !== g.swapUsedIds.length || !g.swapUsedIds.every(legalId) ||
+          !Array.isArray(g.swapSelection) || g.swapSelection.length > 2 ||
+          new Set(g.swapSelection).size !== g.swapSelection.length || !g.swapSelection.every(legalId)) return false;
+      if (g.night) {
+        const n = g.night;
+        if (!(n.fearTarget === null || legalId(n.fearTarget)) || typeof n.wolfBlocked !== 'boolean' ||
+            !Array.isArray(n.blockedRoles) || new Set(n.blockedRoles).size !== n.blockedRoles.length ||
+            typeof n.completed.nightmare !== 'boolean' || typeof n.completed.magician !== 'boolean') return false;
+        if (n.wolfBlocked !== isRoleBlocked(g, 'wolf')) return false;
+        if (n.fearTarget !== null) {
+          const actor = roleActor(g, 'nightmare');
+          if (!actor || actor.id === n.fearTarget || !n.aliveAtStart.includes(n.fearTarget) ||
+              !n.completed.nightmare || actor.skills.lastFearRound !== g.round ||
+              actor.skills.lastFearTarget !== n.fearTarget) return false;
+        }
+        if (n.blockedRoles.some(role => !['wolf', ...BLOCKABLE_NIGHT_ROLES].includes(role) ||
+            !isRoleBlocked(g, role) || !n.completed[role])) return false;
+        if (isRoleBlocked(g, 'wolf') && n.wolfTarget !== null) return false;
+        if (isRoleBlocked(g, 'witch') && (n.poisonTarget !== null || n.healedTarget !== null || n.usedHealTonight)) return false;
+        if (isRoleBlocked(g, 'seer') && (n.seerTarget !== null || n.seerResult !== null)) return false;
+        if (isRoleBlocked(g, 'guard') && n.guardedTarget !== null) return false;
+        if (n.swapPair !== null) {
+          if (!Array.isArray(n.swapPair) || n.swapPair.length !== 2 || n.swapPair[0] === n.swapPair[1] ||
+              !n.swapPair.every(id => legalId(id) && n.aliveAtStart.includes(id) && g.swapUsedIds.includes(id)) ||
+              !roleActor(g, 'magician') || !n.completed.magician || isRoleBlocked(g, 'magician')) return false;
+        }
+        if (g.phase === 'NIGHT_BLOCKED' && (!isRoleBlocked(g, n.activeRole) || n.completed[n.activeRole])) return false;
+        if (g.phase === 'MAGIC_EXHAUSTED' && (n.activeRole !== 'magician' || swapCandidates(g).length >= 2)) return false;
       }
       const counts = Object.fromEntries(ROLE_ORDER.map(r => [r, 0]));
       for (let i = 0; i < g.players.length; i++) {
@@ -964,6 +1142,8 @@
           !integer(p.skills.lastCharmRound) || p.skills.lastCharmRound < 0 || p.skills.lastCharmRound > g.round ||
           !(p.skills.lastCharmTarget === null || (integer(p.skills.lastCharmTarget) &&
             playerById(g, p.skills.lastCharmTarget)?.camp === 'good'))) return false;
+        if (!integer(p.skills.lastFearRound) || p.skills.lastFearRound < 0 || p.skills.lastFearRound > g.round ||
+            !(p.skills.lastFearTarget === null || legalId(p.skills.lastFearTarget))) return false;
         counts[p.role] += 1;
       }
       if (!('modelBond' in g)) return false;
@@ -995,18 +1175,19 @@
     } catch (_) { return false; }
   }
 
-  /** 舊局只補「未配置混血兒」欄位，絕不在進行中新增身份或改變勝方。
-   * V1.3～V1.5 先補狼美人欄位，V1.6 原有魅惑狀態完整保留。
-   */
+  /** 舊局只補未配置的新角色與空白狀態，不重抽身份、不改既有夜間行動／勝方。 */
   function migrateGame(input) {
     if (!input || typeof input !== 'object') return null;
     if (input.schema === SCHEMA && input.ruleset === RULESET) return clone(input);
     const preBeauty = input.schema === 4 && input.ruleset === LEGACY_RULESET;
     const v16 = input.schema === 5 && input.ruleset === V16_RULESET;
-    if ((!preBeauty && !v16) || !input.config?.roles || !Array.isArray(input.players) ||
-        input.players.some(p => !p || !p.skills || p.role === 'mixedblood') ||
-        (input.config.roles.mixedblood ?? 0) !== 0 || input.modelBond != null) return null;
+    const v17 = input.schema === 6 && input.ruleset === V17_RULESET;
+    if ((!preBeauty && !v16 && !v17) || !input.config?.roles || !Array.isArray(input.players) ||
+        input.players.some(p => !p || !p.skills || ['nightmare', 'magician'].includes(p.role)) ||
+        (input.config.roles.nightmare ?? 0) !== 0 || (input.config.roles.magician ?? 0) !== 0) return null;
     if (input.night && (!input.night.completed || typeof input.night.completed !== 'object')) return null;
+    if (!v17 && (input.players.some(p => p.role === 'mixedblood') ||
+        (input.config.roles.mixedblood ?? 0) !== 0 || input.modelBond != null)) return null;
     if (preBeauty && (input.players.some(p => p.role === 'wolfbeauty') ||
         (input.config.roles.wolfbeauty ?? 0) !== 0)) return null;
     const g = clone(input);
@@ -1015,11 +1196,18 @@
       for (const p of g.players) { p.skills.lastCharmTarget = null; p.skills.lastCharmRound = 0; }
       if (g.night) { g.night.completed.wolfbeauty = true; g.night.charmTarget = null; }
     }
+    if (!v17) {
+      g.config.roles.mixedblood = 0; g.modelBond = null;
+      if (g.night) g.night.completed.mixedblood = true;
+    }
     g.schema = SCHEMA; g.ruleset = RULESET; g.version = VERSION;
-    g.config.roles.mixedblood = 0; g.modelBond = null;
+    g.config.roles.nightmare = 0; g.config.roles.magician = 0;
+    g.swapUsedIds = []; g.swapSelection = [];
+    for (const p of g.players) { p.skills.lastFearTarget = null; p.skills.lastFearRound = 0; }
     if (g.night) {
-      if (!g.night.completed) return null;
-      g.night.completed.mixedblood = true;
+      g.night.completed.nightmare = true; g.night.completed.magician = true;
+      g.night.fearTarget = null; g.night.wolfBlocked = false;
+      g.night.swapPair = null; g.night.blockedRoles = [];
     }
     return g;
   }
@@ -1081,7 +1269,7 @@
         g = transition(g, { type: phase === 'DAY_NO_EXECUTION' ? 'CONTINUE_NO_VOTE' : 'CONTINUE_RESULT' });
         continue;
       }
-      const selection = { MIXED_CONFIRM: 'MIXED_SELECT', BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', WOLF_CONFIRM: 'WOLF_SELECT',
+      const selection = { FEAR_CONFIRM: 'FEAR_SELECT', MAGIC_CONFIRM: 'MAGIC_SELECT', MIXED_CONFIRM: 'MIXED_SELECT', BEAUTY_CONFIRM: 'BEAUTY_SELECT', GUARD_CONFIRM: 'GUARD_SELECT', WOLF_CONFIRM: 'WOLF_SELECT',
         SEER_CONFIRM: 'SEER_SELECT', KNIGHT_CONFIRM: 'KNIGHT_SELECT',
         DAY_VOTE_CONFIRM: 'DAY_VOTE_RESULT', DEATH_SKILL_CONFIRM: 'DEATH_SKILL_SELECT' };
       if (selection[phase]) { g.phase = selection[phase]; continue; }
@@ -1127,9 +1315,13 @@
     };
     switch (action?.type) {
       case 'UI_SELECT': {
+        if (g.phase === 'MAGIC_SELECT') {
+          g = transition(g, { type: 'SELECT_SWAP', id: action.id });
+          g.ui.alternative = null; break;
+        }
         if (g.phase === 'WITCH_HEAL' || g.phase === 'WITCH_POISON') {
           assert(g.ui.witchAction === 'poison', '請先選擇「毒藥・毒人」。');
-          const witch = roleActor(g, 'witch');
+          const witch = requireNightAbility(g, 'witch');
           assert(witch && witch.skills.poison > 0 && !g.night.usedHealTonight, '本晚不能使用毒藥。');
           if (g.phase === 'WITCH_HEAL') steps(['SKIP_HEAL']);
         }
@@ -1138,17 +1330,17 @@
         break;
       }
       case 'UI_ALTERNATIVE':
-        assert(['SEER_SELECT', 'DEATH_SKILL_SELECT'].includes(g.phase), '本階段沒有這個選項。');
+        assert(['SEER_SELECT', 'DEATH_SKILL_SELECT', 'FEAR_SELECT', 'MAGIC_SELECT'].includes(g.phase), '本階段沒有這個選項。');
         if (g.phase === 'SEER_SELECT') assert(maySkipSeer(g), '本局不可略過查驗。');
-        g.selected = null; g.ui.alternative = 'pass';
+        g.selected = null; g.swapSelection = []; g.ui.alternative = 'pass';
         break;
       case 'UI_WITCH_CHOICE': {
         expect(g, 'WITCH_HEAL', 'WITCH_POISON');
-        const witch = roleActor(g, 'witch');
+        const witch = requireNightAbility(g, 'witch');
         assert(witch && !g.night.usedHealTonight && g.night.poisonTarget === null, '本晚操作已完成。');
         assert(['heal', 'poison', 'pass'].includes(action.choice), '請選擇本晚行動。');
         if (action.choice === 'heal') {
-          assert(witch.skills.heal > 0 && g.night.wolfTarget !== null && g.night.wolfTarget !== witch.id,
+          assert(witch.skills.heal > 0 && wolfVictim(g) !== null && wolfVictim(g) !== witch.id,
             '本晚不可使用解藥。');
           g.phase = 'WITCH_HEAL';
         } else if (action.choice === 'poison') {
@@ -1160,7 +1352,11 @@
       }
       case 'UI_COMMIT': {
         const phase = g.phase;
-        if (phase === 'WITCH_HEAL' || phase === 'WITCH_POISON') {
+        if (phase === 'FEAR_SELECT' && g.ui.alternative === 'pass') {
+          steps(['PASS_FEAR']);
+        } else if (phase === 'MAGIC_SELECT' && g.ui.alternative === 'pass') {
+          steps(['PASS_MAGIC']);
+        } else if (phase === 'WITCH_HEAL' || phase === 'WITCH_POISON') {
           const choice = g.ui.witchAction;
           if (choice === 'heal') {
             g.phase = 'WITCH_HEAL'; steps(['CHOOSE_HEAL', 'CONFIRM_HEAL', 'ACK_WITCH']);
@@ -1168,7 +1364,7 @@
             assert(g.phase === 'WITCH_POISON', '請先選擇毒殺對象。');
             steps(['REVIEW', 'CONFIRM_POISON', 'ACK_WITCH']);
           } else if (choice === 'pass') {
-            const witch = roleActor(g, 'witch');
+            const witch = requireNightAbility(g, 'witch');
             assert(witch && !g.night.usedHealTonight && g.night.poisonTarget === null, '本晚操作已完成。');
             // 路由回既有不使用流程，不新建第二套扣藥／行動規則。
             if (g.phase === 'WITCH_HEAL') steps(['SKIP_HEAL']);
@@ -1180,7 +1376,7 @@
         } else if (phase === 'SEER_SELECT' && g.ui.alternative === 'pass') {
           steps(['PASS_SEER', 'CONFIRM_PASS_SEER']);
         } else {
-          const confirms = { MIXED_SELECT: 'CONFIRM_MODEL', BEAUTY_SELECT: 'CONFIRM_CHARM', GUARD_SELECT: 'CONFIRM_GUARD', WOLF_SELECT: 'CONFIRM_WOLF',
+          const confirms = { FEAR_SELECT: 'CONFIRM_FEAR', MAGIC_SELECT: 'CONFIRM_SWAP', MIXED_SELECT: 'CONFIRM_MODEL', BEAUTY_SELECT: 'CONFIRM_CHARM', GUARD_SELECT: 'CONFIRM_GUARD', WOLF_SELECT: 'CONFIRM_WOLF',
             SEER_SELECT: 'CONFIRM_SEER', KNIGHT_SELECT: 'CONFIRM_DUEL',
             DEATH_SKILL_SELECT: 'CONFIRM_SKILL', DAY_VOTE_RESULT: 'CONFIRM_VOTE' };
           assert(confirms[phase], '本階段無法提交選擇。');
@@ -1209,6 +1405,8 @@
       roleActor, currentDeath, isNight, isSlotPhase, configuredNightSteps, endIfWinner,
       availableDayAction, markDeath, makeResolution, advanceResolution, startNight, ROLE_ORDER, SCHEMA, RULESET,
       MIN_PLAYERS, MAX_PLAYERS, EVIL_RULES, CHARM_RULES, maySkipSeer, nightOpenText,
+      isRoleBlocked, swapDestination, effectiveNightTarget, wolfVictim, swapCandidates,
+      AUTO_PHASES, SELECT_PHASES, PHASES, BLOCKABLE_NIGHT_ROLES,
       resolveCharm, livingCounts, playerOutcomes, migrateGame, latestDeathPlayers, publicVoteText, publicSkillText,
       interfaceTransition, compactState, pageKey, defaultUI, NIGHT_BUFFER_MS, nightBufferKey, isNightClosing, isNightBuffer };
   }
@@ -1263,6 +1461,8 @@
     menu: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 6h16M4 12h16M4 18h16"/></svg>'
   };
   const ROLE_ART = Object.freeze({
+    nightmare: '<path d="M44 7A22 22 0 1 0 54 43 23 23 0 0 1 44 7Z"/><path d="M11 35c11-15 26-15 37 0-11 14-26 14-37 0Z"/><path d="M31 28v14m19-28 2 5 5 2-5 2-2 5-2-5-5-2 5-2Z"/>',
+    magician: '<path d="M15 13h34l-4 28H19ZM14 30h36M9 41h46v6H9Z"/><path d="M11 54h26l-5-5m5 5-5 5M53 8H27l5-5m-5 5 5 5"/>',
     mixedblood: '<circle cx="23" cy="19" r="9"/><path d="M5 54v-8c0-10 8-16 18-16 5 0 10 2 13 5M13 49v5"/><circle cx="45" cy="25" r="8"/><path d="M34 43c3-5 7-7 12-7 8 0 13 5 13 13v5H38"/><path d="M23 48h15m-5-5 5 5-5 5"/>',
     wolfbeauty: '<path d="m12 27-3-18 17 11h12L55 9l-3 18 3 9-12 14-11 8-11-8L9 36Z"/><path d="m15 17 4 12 8-5m22-7-4 12-8-5M18 34l8 3m20-3-8 3"/><path d="M32 53c-4-3-11-7-11-11 0-5 7-6 11-1 4-5 11-4 11 1 0 4-7 8-11 11Z"/>',
     evilknight: '<path d="M19 28c-8-7-3-17 3-22 0 8 6 8 8 12 1-6 5-8 7-14 8 7 15 15 11 24"/><path d="M17 30c0-10 30-10 30 0v12l-6 5v10H23V47l-6-5Z"/><path d="m23 34 6 4m12-4-6 4M28 45h8M29 49v8m6-8v8M10 49l7 7m30 0 7-7"/>',
@@ -1341,28 +1541,32 @@
   }
   function rulesHTML() {
     return `<details class="rules-details"><summary>查看本版家規與使用提醒</summary><div class="rules-content">
-      <p><strong>角色配置：</strong>5～18 人；普通狼人、狼王、惡靈騎士、狼美人、村民、混血兒、預言家、女巫、獵人、守衛、騎士。特殊角色各最多一名；真正狼人、平民邊、神職邊各至少一名；平民邊含普通村民與混血兒。可只有狼王、惡靈騎士或狼美人、沒有普通狼人，不提供板子選擇。五人也用屠邊，不增加首夜免死或限次查驗。</p>
-      <p><strong>夜間：</strong>首夜混血兒先選榜樣，其後為守衛 → 狼人陣營 → 狼美人 → 預言家 → 女巫。只排有配置的夜間角色。所有狼人陣營共用一刀，仍可選任一存活號碼；刀中惡靈騎士無效。預言家只查陣營，查惡靈顯示狼人；本局若有配置惡靈，預言家每晚也可選不查驗。入夜時存活的角色可以完成當晚操作，即使同晚死亡。</p>
+      <p><strong>角色配置：</strong>5～18 人；普通狼人、狼王、惡靈騎士、狼美人、夢魘、村民、混血兒、預言家、女巫、獵人、守衛、騎士、魔術師。特殊角色各最多一名；真正狼人、平民邊、神職邊各至少一名；平民邊含普通村民與混血兒。可只有狼王、惡靈騎士或狼美人、沒有普通狼人，不提供板子選擇。五人也用屠邊，不增加首夜免死或限次查驗。</p>
+      <p><strong>夜間：</strong>首夜混血兒先選榜樣，其後為夢魘 → 魔術師 → 守衛 → 狼人陣營 → 狼美人 → 預言家 → 女巫。只排有配置的夜間角色。所有狼人陣營共用一刀，仍可選任一存活號碼；刀中惡靈騎士無效。預言家只查陣營，查惡靈顯示狼人；本局若有配置惡靈，預言家每晚也可選不查驗。入夜時存活的角色可以完成當晚操作，即使同晚死亡。</p>
+      <p><strong>夢魘：</strong>每晚可恐懼一名其他存活玩家或選不恐懼，不能連續兩晚選同一人。封鎖當晚主動夜間能力；恐懼真正狼人，整隊當晚停刀，但未被恐懼的特殊狼人仍能用自己的主動能力。恐懼狼美人同時封魅惑與全隊狼刀。混血兒即使跟狼，也不會造成停刀。封鎖只在私人操作頁顯示，不以語音公布號碼。夢魘同晚死亡不取消已成立的恐懼。</p>
+      <p><strong>恐懼範圍：</strong>預言家不能查驗；女巫不能看刀、用藥且不扣藥；守衛不能守；魔術師不能換也不消耗號碼；狼美人本晚無新魅惑、上一晚連結不延續。混血兒首夜榜樣、惡靈免死／反傷及所有白天能力、獵人合法反擊不受影響。無可封能力者照常生活，夢魘不收到角色回報。</p>
+      <p><strong>魔術師：</strong>每晚可交換兩個不同的存活號碼（可選自己），或選不交換。每個號碼整局只可參與一次成功交換；取消、空過或被封均不消耗。可用號碼少於兩個時可直接結束。只交換本晚狼刀、守護、查驗、毒藥的實際對象；不交換身份／陣營、恐懼、榜樣、魅惑、反傷或天亮後技能。</p>
+      <p><strong>交換結算：</strong>女巫看交換後實際刀口，解藥直接救此人，不再交換第二次；實際刀口為自己仍不可救。自毒、查自己與連守的限制以直接點選號碼判斷，允許交换導致的間接結果。同守同救比較實際狼刀、守護與解藥對象。查驗／毒藥實際落在惡靈才觸發反傷，反傷回原施法者，不再交換。夢魘先於魔術師生效，不能用交換搬走恐懼。</p>
       <p><strong>混血兒：</strong>每局最多一名，第一夜先選一名其他玩家為榜樣，不能跳過或改選。系統不告知榜樣陣營，亦不通知榜樣本人。只跟隨榜樣原本陣營的勝負，不複製技能、不加入狼人隊友或狼刀、不可自爆。榜樣或本人死亡不改變歸屬、不連動死亡。第二夜起不再安排混血兒時段。</p>
       <p><strong>混血兒與屠邊：</strong>永遠固定計入平民邊；要屠民，普通村民與混血兒均須出局；屠神則不要求混血兒死亡。查驗一律顯示好人，騎士決鬥他會失敗，狼美人可魅惑他。即使跟狼同勝負也不算真正狼人；真正狼人全滅時仍依既有終局與反擊規則結算，不能由混血兒接手狼刀。最後狼美人魅惑帶走最後平民混血兒，可以觸發既定的魅惑屠邊例外。查驗顯示好人不保證個人勝負同屬好人。</p>
-      <p><strong>女巫：</strong>不可自救或自毒；解藥、毒藥各一次，同夜只能用一瓶。<strong>解藥尚在才能看狼刀；用完後連本人被刀也不顯示號碼。</strong>不透露守護目標。</p>
+      <p><strong>女巫：</strong>不可自救或直接自毒；交換可能造成間接自毒。解藥、毒藥各一次，同夜只能用一瓶。<strong>解藥尚在才能看狼刀；用完後連本人被刀也不顯示號碼。</strong>不透露守護目標。</p>
       <p><strong>守衛：</strong>可自守、可空守，不可連續兩晚守同一人；空守一晚後可重守。守護只影響當晚普通狼刀，同晚死亡不取消已確認守護。<strong>同守同救仍死亡</strong>，死者可依資格帶人；毒藥不能擋，含毒死因不能帶人。</p>
       <p><strong>騎士：</strong>整局決鬥一次，限存活且白天發言時使用，不限自己的發言輪。選到狼人陣營，目標死亡、取消投票，未終局就下一夜；選到好人，自己死亡、未終局則回白天。<strong>決鬥死者一律無遺言；被決鬥的狼王不能帶人。</strong></p>
       <p><strong>狼王：</strong>被狼刀、放逐、其他帶人技能、同守同救或自爆致死時可帶人；被毒或騎士決鬥不能帶人。狼人隊友只列號碼，不標出誰是狼王。</p>
-      <p><strong>狼美人：</strong>每局最多一名，可為唯一狼人，參與共同狼刀、不可自爆。第一夜起每晚<strong>必須</strong>選一名其他存活好人，不能選自己／狼人隊友，也不能連續兩晚選同一人。沒有「不魅惑」選項。只保留當晚目標，到下一夜開始清除；目標先死亡不補選、不反向連動，也不改變對方身份、陣營或投票權。</p>
+      <p><strong>狼美人：</strong>每局最多一名，可為唯一狼人，參與共同狼刀、不可自爆。第一夜起每晚未被恐懼時<strong>必須</strong>選一名其他存活好人，不能選自己／狼人隊友，也不能連續兩晚選同一人。沒有「不魅惑」選項。只保留當晚目標，到下一夜開始清除；目標先死亡不補選、不反向連動，也不改變對方身份、陣營或投票權。</p>
       <p><strong>魅惑連動：</strong>被放逐或被獵人／狼王帶走時，系統自動讓當晚目標死亡，不再詢問或重新選人。<strong>狼刀（含自刀）、毒藥、同守同救與騎士決鬥造成狼美人死亡，均不連動。</strong>守護與解藥不能擋魅惑死亡。被魅惑帶走的獵人保留合法反擊，死因含毒藥仍不能開槍。</p>
       <p><strong>最後狼美人的專屬例外：</strong>狼美人死亡當下若是最後狼人，先結算有效魅惑；<strong>只有魅惑新增死亡直接把村民或神職清空，狼人才能依此例外獲勝；否則好人勝。</strong>仍先讓獵人完成合法反擊、不安排遺言。此例外不適用狼王；若狼美人死亡時還有其他狼人，獵人之後帶走最後狼人仍判好人勝。投對最後狼美人仍可能因連動屠邊落敗。</p>
       <p><strong>惡靈騎士／本版採用值：</strong>夜間免死，狼刀、毒藥及同守同救無效；參與共同狼刀但不可自爆。全局一次被動反傷，僅由預言家查驗或女巫下毒觸發，<strong>同晚驗毒只反傷女巫</strong>；毒藥仍消耗，反傷不可被守護或解藥阻擋。守護、解藥本身不觸發反傷。反傷用過後仍夜間免死。夜間全部結算後才公布死亡，不提示反傷或免疫是否發動，也不向本人顯示剩餘次數。</p>
       <p><strong>惡靈與白天技能：</strong>被投票放逐、騎士決鬥、獵人或狼王帶人，會正常出局，不反傷對方。<strong>本網站天亮後執行的帶人一律視為白天技能</strong>，包含原本在夜間死亡的獵人或狼王。惡靈本身沒有死亡帶人能力。</p>
-      <p><strong>自爆：</strong>普通狼人與狼王皆可在白天發言時點自己的號碼自爆；自爆者沒有遺言，取消本日投票。<strong>狼王自爆可以帶人</strong>；未終局則完整處理可用技能與死亡流程後下一夜。進入投票／PK 就不能自爆或決鬥。</p>
+      <p><strong>自爆：</strong>普通狼人、狼王與夢魘皆可在白天發言時點自己的號碼自爆；自爆者沒有遺言，取消本日投票。<strong>狼王自爆可以帶人</strong>；未終局則完整處理可用技能與死亡流程後下一夜。進入投票／PK 就不能自爆或決鬥。</p>
       <p><strong>白天操作：</strong>號碼不標身份，各玩家只點自己。選擇後只需一次提交，不另外跳確認頁。先完成最終確認的合法動作先結算，不接受中途插入或追溯取消。自行投票與平票 PK，只輸入號碼或「沒有人出局」。沒有警長。</p>
       <p><strong>死亡技能：</strong>獵人被狼刀、放逐、帶人、魅惑或同守同救致死可帶一名存活玩家，含毒死因不行。技能可放棄。公開介面只問「你要啟動技能嗎？」，不顯示身份或專屬圖示。</p>
       <p><strong>屠邊與 B 反擊規則：</strong>除上述最後狼美人的有效魅惑例外，全部狼人陣營死亡優先判好人勝；否則村民全滅或神職全滅，狼人勝。夜間效果同批結算。<strong>出現勝利條件但仍有獵人合法反擊時，跳過遺言、先反擊再判勝負。</strong>狼王沒有這項保障：最後狼王出局（含自爆）直接好人勝，不再帶人。</p>
       <p><strong>遺言：</strong>尚未終局的一般夜死、放逐及技能帶人有遺言；騎士決鬥與自爆者沒有。終局前反擊不安排遺言，結束後也不補。多人夜死按號碼順序處理。</p>
       <p><strong>操作時間：</strong>完成可立即結束；逾時只低頻閃紅催促，仍能選擇、返回與確認。已配置但已死亡的夜間角色保留等待時段，時間差仍可能成為推理線索。</p>
       <p><strong>資訊保護：</strong>私密身份、夜間目標與查驗結果不朗讀。切換 App 或暫停會遮蔽。沒有操作碼，網站不能驗證拿手機的人，禁止試點他人號碼；所有玩家仍須遵守閉眼規則。</p>
-      <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版新增混血兒，固定算平民、個人勝負跟隨榜樣。V1.3～V1.6 舊局可按原配置延續，但不能中途加入角色；V1.2 及更早的舊局不相容。</p>
-      <p><strong>V1.7 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
+      <p><strong>存檔與語音：</strong>只在此網址、此瀏覽器儲存，不跨裝置同步。請只開一個主持分頁，避免無痕模式及清除網站資料。語音使用裝置提供的中文聲音，開局前先測試。沒有離線快取，請先連網開啟 GitHub Pages。本版新增夢魘與魔術師，混血兒規則不變。V1.3～V1.7 舊局可按原配置延續，但不能中途加入角色；V1.2 及更早的舊局不相容。</p>
+      <p><strong>V1.8 操作：</strong>夜間選人與死亡技能在同頁選擇後提交一次；女巫綠色十字瓶為解藥、紫色骷髏瓶為毒藥，確認前可改選，確認後不可撤銷。睜眼主持詞播完立即開放操作；每段閉眼主持詞播完，再留 3 秒緩衝後呼喚下一角色。文字模式讀完閉眼提示、按「已閉眼」後開始緩衝。開局查看身份仍須本人逐一確認。</p>
     </div></details>`;
   }
 
@@ -1391,7 +1595,7 @@
       const item = JSON.parse(raw);
       const migrated = item ? migrateGame(item.game) : null;
       if (!migrated || !validGame(migrated)) {
-        saveIssue = '存檔無法讀取，或不是相容的 V1.3～V1.7 存檔。請開始新遊戲；確認分配身份後才會覆蓋舊存檔。';
+        saveIssue = '存檔無法讀取，或不是相容的 V1.3～V1.8 存檔。請開始新遊戲；確認分配身份後才會覆蓋舊存檔。';
         return null;
       }
       return { ...item, schema: SCHEMA, game: migrated };
@@ -1765,11 +1969,18 @@
     const stored = savedEnvelope?.game;
     const resume = stored ? `<div class="resume-card"><div class="resume-text"><strong>${stored.status === 'finished' ? '上一局已結束' : '有一局尚未結束'}</strong><p>${stored.round ? `第 ${stored.round} 回合` : '身份分配階段'} · ${stored.config.playerCount} 人</p></div></div>` : '';
     return `<div class="page"><section class="panel home-panel">
-      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.7</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
-      <p class="home-copy">十一種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
+      <div class="home-top"><div><span class="eyebrow">WEREWOLF / V1.8</span><h1 class="home-title title-serif">狼人殺<br>自動法官</h1></div><div class="moon-art" aria-hidden="true"><span class="moon"></span></div></div>
+      <p class="home-copy">十三種角色，5～18 人自訂配置。<br>一支手機，完成發牌、主持與結算。</p>
       ${resume}<div class="actions">${stored ? btn(stored.status === 'finished' ? '查看上一局結果' : '繼續上次遊戲', 'LOAD_GAME') : ''}${btn(`開始新遊戲 ${icons.arrow}`, 'NEW_GAME', stored ? 'secondary' : 'primary')}</div>
       <div class="home-features"><div class="feature"><strong>一機輪流</strong>不用實體身份牌</div><div class="feature"><strong>語音帶局</strong>夜間流程自動推進</div><div class="feature"><strong>自動結算</strong>記錄死亡與勝負</div></div>
     </section>${rulesHTML()}</div>`;
+  }
+  function newNightRulesNote() {
+    if (!draft.roles.nightmare && !draft.roles.magician) return '';
+    const lines = [];
+    if (draft.roles.nightmare) lines.push('夢魘每晚可恐懼、不可連恐；恐懼狼人＝全隊停刀。');
+    if (draft.roles.magician) lines.push('魔術師每晚可換兩號；用過的號碼整局不可再換。女巫看實際刀口。');
+    return note('<strong>恐懼／交換家規</strong><br>' + lines.join('<br>'));
   }
   function beautyRulesNote() {
     return note('<strong>狼美人家規</strong><br>每晚必須魅惑好人 · 不可連魅 · 不可自爆<br>放逐／帶人觸發；狼刀、毒藥、同守同救、決鬥不觸發。<br><strong>最後狼美人的有效魅惑若直接屠邊，狼人可勝；獵人仍先合法反擊。</strong>');
@@ -1802,7 +2013,7 @@
       ${sideCountsHTML(draft)}<div class="camp-config">${groups}</div><div class="config-count"><span>已配置角色</span><strong>${totalConfigured()} / ${draft.playerCount}</strong></div>
       ${errors.length ? note(errors.map(esc).join('<br>'), 'warning') : note('配置完成。特殊角色各 0 或 1 名；普通狼人可為 0，只要狼人陣營合計至少一名即可。')}
       ${draft.playerCount === 5 ? note('五人仍採屠邊，第一夜起正常行動；本配置未經勝率平衡驗證，反傷可能讓遊戲快速結束。') : ''}
-      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}${draft.roles.mixedblood ? mixedRulesNote() : ''}
+      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}${draft.roles.mixedblood ? mixedRulesNote() : ''}${newNightRulesNote()}
       <div class="center"><button type="button" class="text-button" data-action="RECOMMEND_ROLES">依人數重新配置</button></div>
       <div class="actions two">${btn('上一步', 'SETUP_COUNT', 'secondary')}${btn('確認設定', 'SETUP_CONFIRM', 'primary', errors.length ? 'disabled' : '')}</div>`);
   }
@@ -1810,7 +2021,7 @@
   function renderSetupConfirm() {
     return `<div class="page"><section class="panel">${stepTrack(3)}${heading(`${draft.playerCount} 人局，準備入夜`, '請確認角色與主持設定，再開始秘密發牌。', '03 / 確認設定')}
       ${sideCountsHTML(draft)}${roleSummary(draft)}${note('<strong>本版固定家規</strong><br>屠邊勝負 · 女巫不可自救 · 同守同救死亡<br>獵人保有合法反擊 · 狼王自爆可帶人<br>解藥用完不看刀 · 決鬥、自爆者無遺言')}
-      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}${draft.roles.mixedblood ? mixedRulesNote() : ''}
+      ${draft.roles.evilknight ? evilRulesNote() : ''}${draft.roles.wolfbeauty ? beautyRulesNote() : ''}${draft.roles.mixedblood ? mixedRulesNote() : ''}${newNightRulesNote()}
       <hr class="divider"><h2>主持設定</h2>${audioSettingsHTML(true)}
       ${savedEnvelope?.game.status !== 'finished' && savedEnvelope ? note('按下「分配身份」會覆蓋尚未結束的上一局。', 'warning') : ''}
       <div class="actions two">${btn('修改角色', 'SETUP_ROLES', 'secondary')}${btn('分配身份', 'DEAL')}</div>
@@ -1854,10 +2065,14 @@
   }
   function grid() {
     const allowed = eligibleTargets(game);
-    return `<div class="players-grid play-grid" data-player-count="${game.players.length}" role="group" aria-label="玩家號碼">${game.players.map(p => {
-      const disabled = !allowed.includes(p.id);
-      const selected = p.id === game.selected && !game.ui?.alternative;
-      return `<button type="button" class="player-button ${selected ? 'selected' : ''} ${p.alive ? '' : 'dead'}" data-action="UI_SELECT" data-id="${p.id}" aria-label="${p.id} 號${!p.alive ? '，已出局' : disabled ? '，不可選' : ''}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}><span class="number">${p.id}</span>${!p.alive ? '<span class="dead-mark" aria-hidden="true">×</span>' : ''}</button>`;
+    const magic = game.phase === 'MAGIC_SELECT';
+    const pair = game.swapSelection || [];
+    return `<div class="players-grid play-grid" data-player-count="${game.players.length}" role="group" aria-label="${magic ? '選擇兩個交換號碼，再次點擊可取消' : '玩家號碼'}">${game.players.map(p => {
+      const selected = (magic ? pair.includes(p.id) : p.id === game.selected) && !game.ui?.alternative;
+      const spent = magic && game.swapUsedIds.includes(p.id);
+      const disabled = !allowed.includes(p.id) || (magic && pair.length === 2 && !selected);
+      const reason = !p.alive ? '已出局' : spent ? '已交換' : disabled ? '不可選' : '';
+      return `<button type="button" class="player-button ${selected ? 'selected' : ''} ${p.alive ? '' : 'dead'} ${spent ? 'swap-spent' : ''}" data-action="UI_SELECT" data-id="${p.id}" aria-label="${p.id} 號${reason ? '，' + reason : ''}" aria-pressed="${selected}" ${disabled ? 'disabled' : ''}><span class="number">${p.id}</span>${!p.alive ? '<span class="dead-mark" aria-hidden="true">×</span>' : spent ? '<span class="swap-spent-label">已交換</span>' : ''}</button>`;
     }).join('')}</div>`;
   }
   function discussionGrid() {
@@ -1873,6 +2088,21 @@
     const selected = game.selected;
     const alt = game.ui?.alternative === 'pass';
     switch (game.phase) {
+      case 'FEAR_SELECT': {
+        const actor = roleActor(game, 'nightmare');
+        const last = actor.skills.lastFearRound === game.round - 1 ? actor.skills.lastFearTarget : null;
+        detail = last !== null ? `上晚恐懼 ${last} 號，本晚不可連恐` : '';
+        label = alt ? '確定今晚不恐懼' : selected !== null ? `確定恐懼 ${selected} 號` : '請選擇恐懼對象';
+        extra = choiceButton('今晚不恐懼', 'UI_ALTERNATIVE', alt);
+        break;
+      }
+      case 'MAGIC_SELECT': {
+        const pair = game.swapSelection;
+        detail = '再點已選號碼可取消';
+        label = alt ? '確定今晚不交換' : pair.length === 2 ? `確定交換 ${pair[0]} 號 ↔ ${pair[1]} 號` : '請選擇兩個號碼';
+        extra = choiceButton('今晚不交換', 'UI_ALTERNATIVE', alt);
+        break;
+      }
       case 'MIXED_SELECT':
         detail = '只選一次，不告知榜樣陣營';
         label = selected !== null ? `確定選擇 ${selected} 號` : '請選擇榜樣';
@@ -1911,7 +2141,7 @@
         extra = choiceButton('沒有人出局', 'UI_SELECT', selected === 0, 'data-id="0"');
         break;
     }
-    const ready = selected !== null || alt;
+    const ready = game.phase === 'MAGIC_SELECT' ? game.swapSelection.length === 2 || alt : selected !== null || alt;
     const actions = btn(label, 'UI_COMMIT', 'primary', ready ? '' : 'disabled') +
       (game.phase === 'KNIGHT_SELECT' ? btn('返回發言', 'CANCEL_DAY_ACTION', 'secondary') : '');
     return playPage(`${!isNight(game) ? publicNoticeHTML() : ''}${playHeading(title, detail, actorId)}${grid()}${extra}`, actions);
@@ -1927,7 +2157,7 @@
     const witch = roleActor(game, 'witch');
     const healRemaining = witch.skills.heal > 0;
     // 未持有解藥時，連 data 屬性、可及名稱都不寫入狼刀號碼。
-    const target = healRemaining ? game.night.wolfTarget : null;
+    const target = healRemaining ? wolfVictim(game) : null;
     const canHeal = healRemaining && target !== null && target !== witch.id;
     const canPoison = witch.skills.poison > 0;
     const action = game.ui?.witchAction;
@@ -2002,6 +2232,12 @@
           <div class="actions">${btn(`${icons.audio} 測試主持語音`, 'TEST_VOICE', 'secondary')}${btn(settings.audio ? '啟用語音並開始遊戲' : '以文字模式開始遊戲', 'START')}</div>
           <div class="center"><button type="button" class="text-button" data-action="TOGGLE_AUDIO">${settings.audio ? '改用文字模式' : '改用語音模式'}</button></div>
           <p class="tiny muted no-margin">文字模式需有人讀出畫面指示。請先確認每位玩家聽得見語音。</p>`, 'center');
+      case 'NIGHT_BLOCKED':
+        return playPage(`${ribbon()}${symbol('lock')}<h1 class="cue-title">${game.night.activeRole === 'wolf' ? '今晚無法襲擊' : '今晚無法使用技能'}</h1>`, btn('結束操作', 'ACK_BLOCKED'), 'center cue-panel blocked-panel');
+      case 'MAGIC_EXHAUSTED':
+        return playPage(`${ribbon()}${symbol('star')}<h1 class="cue-title">沒有可交換組合</h1>`, btn('結束操作', 'PASS_MAGIC'), 'center cue-panel');
+      case 'FEAR_SELECT': return selectionPage('今晚恐懼誰？');
+      case 'MAGIC_SELECT': return selectionPage('交換哪兩個號碼？');
       case 'MIXED_SELECT': return selectionPage('選擇你的榜樣');
       case 'GUARD_SELECT': return selectionPage('今晚守護誰？');
       case 'WOLF_SELECT': return selectionPage('今晚襲擊誰？');
@@ -2070,24 +2306,30 @@
   }
   function historyDescription(entry) {
     const target = entry.target;
+    const redirected = Object.prototype.hasOwnProperty.call(entry, 'actualTarget') ? `（交換後實際為 ${entry.actualTarget} 號）` : '';
     switch (entry.type) {
+      case 'fear_select': return `夢魘恐懼 ${target} 號。`;
+      case 'fear_pass': return '夢魘本晚未使用恐懼。';
+      case 'ability_blocked': return `${entry.role === 'wolf' ? '狼人全隊無法襲擊' : ROLES[entry.role].name + '本晚無法使用技能'}。`;
+      case 'magic_swap': return `魔術師交換 ${entry.pair[0]} 號與 ${entry.pair[1]} 號。`;
+      case 'magic_pass': return '魔術師本晚未交換號碼。';
       case 'model_select': {
         const result = playerOutcomes(game).find(p => p.playerId === entry.source);
         return `${entry.source} 號混血兒選擇 ${target} 號為榜樣。${result ? `跟隨${result.victoryCamp === 'wolf' ? '狼人' : '好人'}陣營，本局${result.won ? '獲勝' : '落敗'}。` : ''}`;
       }
-      case 'guard_protect': return entry.target === null ? '守衛本晚不守護。' : `守衛守護 ${entry.target} 號。`;
+      case 'guard_protect': return entry.target === null ? '守衛本晚不守護。' : `守衛守護 ${entry.target} 號${redirected}。`;
       case 'knight_duel': return `${entry.source} 號向 ${target} 號決鬥；${entry.victim} 號死亡，無遺言。${entry.success ? '取消本日投票。' : '未終局則繼續白天。'}`;
       case 'self_destruct': return `${entry.source} 號自爆出局；無遺言，本日取消投票。`;
-      case 'wolf_attack': return `狼人襲擊 ${target} 號。`;
+      case 'wolf_attack': return `狼人襲擊 ${target} 號${redirected}。`;
       case 'charm_select': return `${entry.source} 號狼美人魅惑 ${target} 號（僅當晚至接續白天有效）。`;
       case 'charm_link': return `${entry.source} 號狼美人出局，魅惑連動使 ${target} 號死亡。${entry.lastWolfException ? '本次連動直接屠邊，符合最後狼美人的勝負例外。' : ''}`;
       case 'charm_inactive': return `${entry.source} 號狼美人死亡，${entry.reason === 'target_dead' ? '目標已死亡，沒有新增連動。' : '死因或連結不符合條件，不觸發魅惑。'}`;
       case 'seer_pass': return '預言家本晚不查驗。';
       case 'evil_reflect': return `${entry.source} 號惡靈騎士因${entry.trigger === 'witch_poison' ? '女巫下毒' : '預言家查驗'}觸發一次反傷，${target} 號死亡。`;
       case 'evil_immune': return `${target} 號惡靈騎士免疫本晚傷害：${entry.causes.map(c => ({ wolf: '狼刀', witch_poison: '毒藥', guard_heal: '同守同救' }[c] || c)).join('、')}。`;
-      case 'seer_check': return `預言家查驗 ${target} 號：${entry.result === 'wolf' ? '狼人' : '好人'}。`;
+      case 'seer_check': return `預言家查驗 ${target} 號${redirected}：${entry.result === 'wolf' ? '狼人' : '好人'}。`;
       case 'witch_heal': return `女巫使用解藥，救 ${target} 號。`;
-      case 'witch_poison': return `女巫使用毒藥，毒 ${target} 號。`;
+      case 'witch_poison': return `女巫使用毒藥，毒 ${target} 號${redirected}。`;
       case 'witch_pass': return '女巫本晚未使用藥品。';
       case 'role_inactive': return `${ROLES[entry.role]?.name || '此角色'}無存活行動者，本晚保留主持流程。`;
       case 'night_result': return entry.deaths.length ? `夜間死亡：${entry.deaths.map(id => `${id} 號`).join('、')}。` : '夜間結果：平安夜。';
@@ -2135,7 +2377,7 @@
     // 私密內容不使用 aria-live，以免輔助朗讀器自動念出身份。
     if (view === 'game' && active && !paused && !foreignUpdate && game.status !== 'finished') {
       toolbar.innerHTML = `<button type="button" class="icon-button" data-action="REPLAY" aria-label="重播公開主持詞" title="重播公開主持詞" ${!safeReplayPrompt() ? 'disabled' : ''}>${icons.audio}<span class="toolbar-label">重播</span></button><button type="button" class="icon-button" data-action="PAUSE" aria-label="暫停並遮蔽畫面" title="暫停">${icons.pause}</button>`;
-    } else toolbar.innerHTML = '<span class="version-pill">V1.7</span>';
+    } else toolbar.innerHTML = '<span class="version-pill">V1.8</span>';
     renderNotice(); renderFooter(); updateVoiceOptions(); updateTimerDOM();
   }
 
@@ -2206,6 +2448,7 @@
   }
 
   const ENGINE_ACTIONS = new Set([
+    'ACK_BLOCKED', 'PASS_MAGIC', 'PASS_FEAR', 'CONFIRM_FEAR', 'CONFIRM_SWAP',
     'AUTO', 'UI_COMMIT', 'UI_ALTERNATIVE',
     'REVEAL', 'REMEMBER', 'START', 'REVIEW', 'BACK', 'CONFIRM_GUARD', 'CONFIRM_WOLF', 'CONFIRM_MODEL', 'CONFIRM_CHARM', 'CONFIRM_SEER',
     'ACK_SEER', 'PASS_SEER', 'CONFIRM_PASS_SEER', 'CHOOSE_HEAL', 'CONFIRM_HEAL', 'SKIP_HEAL', 'PASS_POISON',
@@ -2259,7 +2502,7 @@
         }
         case 'TOGGLE_ROLE': {
           const role = button.dataset.role;
-          if (['seer', 'witch', 'hunter', 'guard', 'knight', 'wolfking', 'evilknight', 'wolfbeauty', 'mixedblood'].includes(role)) { draft.roles[role] = draft.roles[role] ? 0 : 1; render(); }
+          if (['seer', 'witch', 'hunter', 'guard', 'knight', 'wolfking', 'evilknight', 'wolfbeauty', 'mixedblood', 'nightmare', 'magician'].includes(role)) { draft.roles[role] = draft.roles[role] ? 0 : 1; render(); }
           break;
         }
         case 'RECOMMEND_ROLES': draft.roles = recommendedRoles(draft.playerCount); render(); break;
